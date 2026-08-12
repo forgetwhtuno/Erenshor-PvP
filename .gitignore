@@ -1,0 +1,7 @@
+# Build output.
+bin/
+obj/
+
+# Local reference assemblies copied from the installed game and BepInEx profile.
+# These are not redistributable; BUILD_AND_INSTALL.ps1 resolves them at build time.
+refs/
