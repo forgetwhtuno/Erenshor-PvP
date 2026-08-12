@@ -82,7 +82,7 @@ Implemented in the current source, but still needs live verification:
 - [ ] Verify `/epvp flee` and the FIGHT-tab Flee button end only an active lethal encounter, remove every proxy, and increment Escapes without counting a win or loss.
 - [ ] Verify the anti-farm cooldown survives reload and blocks repeated reward claims.
 - [ ] Verify arranged and ambush wins/losses appear in the correct SCORE counters.
-- [ ] Verify last opponent, last mode, and last result persist in BepInEx configuration.
+- [ ] Verify last opponent, last mode, and last result persist in native Lunaris configuration.
 - [ ] Find and verify a slot-safe native cosmetic unlock API. Direct `TransmogSlots` writes are disabled because a weapon could enter the chest cosmetic position and hide armor.
 - [ ] Balance XP, gold, cosmetic chance, and cooldown after several real matches.
 
@@ -103,4 +103,4 @@ Implemented in the current source, but still needs live verification:
 - [ ] Record a clean deployed DLL hash for each release candidate.
 - [ ] Retest native reflection hooks after every Erenshor game update.
 - [ ] Package the plugin with a first-run configuration explanation and the in-game test commands.
-- [ ] Do not mark the mod fully complete until the live acceptance items above have captured evidence in the BepInEx log.
+- [ ] Do not mark the mod fully complete until the live acceptance items above have captured evidence in the Lunaris log.

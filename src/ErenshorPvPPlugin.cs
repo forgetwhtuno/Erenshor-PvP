@@ -1,33 +1,38 @@
 using System;
-using BepInEx;
+using Lunaris;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
 namespace ErenshorPvP
 {
-    [BepInPlugin("forgetwhtuno.erenshor.pvp", "Erenshor PvP", "0.4.0")]
-    [BepInProcess("Erenshor.exe")]
-    public sealed class ErenshorPvPPlugin : BaseUnityPlugin
+    [LunarisPlugin("forgetwhtuno.erenshor.pvp", "0.5.0", "forgetwhtuno",
+        "Standalone MMO-style PvP encounters for Erenshor: consensual arranged challenges and rare wild ambushes against off-map Sim proxies, with real player death/respawn.")]
+    [LunarisPermission(LunarisPermission.Reflection | LunarisPermission.Harmony)]
+    public sealed class ErenshorPvPPlugin : LunarisPlugin
     {
         private Harmony _harmony;
+        private PvpSettings _settings;
 
         private void Awake()
         {
             ErenshorPvPPluginHolder.Instance = this;
-            PvpController.Initialize(Config);
+            _settings = new PvpSettings();
+            Config.Register(ref _settings);
+            PvpController.SaveSettings = delegate { try { Config.Save(); } catch { } };
+            PvpController.Initialize(_settings);
             _harmony = new Harmony("forgetwhtuno.erenshor.pvp");
             _harmony.PatchAll();
             SceneManager.sceneLoaded += OnSceneLoaded;
             SceneManager.sceneUnloaded += OnSceneUnloaded;
-            Logger.LogInfo("Erenshor PvP 0.4.0 loaded. Disabled by default; use /epvp or F10 for world PvP.");
+            Logging.LogInfo("Erenshor PvP 0.5.0 loaded. Disabled by default; use /epvp or F10 for world PvP.");
         }
 
-        private void Update() { try { PvpController.Tick(); } catch (Exception ex) { Logger.LogError("PvP update failed: " + ex); } }
-        private void OnGUI() { try { PvpController.Draw(); } catch (Exception ex) { Logger.LogError("PvP UI failed: " + ex); } }
+        private void Update() { try { PvpController.Tick(); } catch (Exception ex) { Logging.LogError("PvP update failed: " + ex); } }
+        private void OnGUI() { try { PvpController.Draw(); } catch (Exception ex) { Logging.LogError("PvP UI failed: " + ex); } }
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode) { PvpController.SceneTransition(); }
         private void OnSceneUnloaded(Scene scene) { PvpController.SceneTransition(); }
-        private void OnDestroy() { PvpController.Shutdown(); ErenshorPvPPluginHolder.Instance = null; try { SceneManager.sceneLoaded -= OnSceneLoaded; SceneManager.sceneUnloaded -= OnSceneUnloaded; } catch { } try { if (_harmony != null) _harmony.UnpatchSelf(); } catch { } }
+        private void OnDestroy() { PvpController.Shutdown(); PvpController.SaveSettings = null; ErenshorPvPPluginHolder.Instance = null; try { SceneManager.sceneLoaded -= OnSceneLoaded; SceneManager.sceneUnloaded -= OnSceneUnloaded; } catch { } try { if (_harmony != null) _harmony.UnpatchSelf(); } catch { } }
 
         internal bool Handle(TypeText typeText, string raw)
         {

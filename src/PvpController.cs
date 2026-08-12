@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
-using BepInEx.Configuration;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
@@ -9,24 +8,29 @@ namespace ErenshorPvP
 {
     internal static class PvpController
     {
-        private static ConfigEntry<bool> _enabled;
-        private static ConfigEntry<bool> _arrangedEnabled;
-        private static ConfigEntry<int> _offerCooldownMinutes;
-        private static ConfigEntry<bool> _ambushEnabled;
-        private static ConfigEntry<string> _ambushZones;
-        private static ConfigEntry<int> _ambushMinimumMinutes;
-        private static ConfigEntry<int> _ambushMaximumMinutes;
-        private static ConfigEntry<int> _ambushChancePercent;
-        private static ConfigEntry<string> _protectedZones;
-        private static ConfigEntry<string> _highRiskZones;
-        private static ConfigEntry<int> _standardRange;
-        private static ConfigEntry<int> _highRiskRange;
-        private static ConfigEntry<float> _panelOffsetX;
-        private static ConfigEntry<float> _panelOffsetY;
-        private static ConfigEntry<bool> _showDebugTab;
-        private static ConfigEntry<bool> _showQuickToggle;
-        private static ConfigEntry<bool> _fullView;
-        private static ConfigEntry<bool> _validationLogging;
+        // Wired by ErenshorPvPPlugin to Lunaris's Config.Save(); called explicitly after every
+        // settings mutation below, since native Lunaris config (unlike BepInEx's ConfigEntry)
+        // does not persist a .Value write to disk on its own.
+        internal static Action SaveSettings;
+
+        private static PvpConfigEntry<bool> _enabled;
+        private static PvpConfigEntry<bool> _arrangedEnabled;
+        private static PvpConfigEntry<int> _offerCooldownMinutes;
+        private static PvpConfigEntry<bool> _ambushEnabled;
+        private static PvpConfigEntry<string> _ambushZones;
+        private static PvpConfigEntry<int> _ambushMinimumMinutes;
+        private static PvpConfigEntry<int> _ambushMaximumMinutes;
+        private static PvpConfigEntry<int> _ambushChancePercent;
+        private static PvpConfigEntry<string> _protectedZones;
+        private static PvpConfigEntry<string> _highRiskZones;
+        private static PvpConfigEntry<int> _standardRange;
+        private static PvpConfigEntry<int> _highRiskRange;
+        private static PvpConfigEntry<float> _panelOffsetX;
+        private static PvpConfigEntry<float> _panelOffsetY;
+        private static PvpConfigEntry<bool> _showDebugTab;
+        private static PvpConfigEntry<bool> _showQuickToggle;
+        private static PvpConfigEntry<bool> _fullView;
+        private static PvpConfigEntry<bool> _validationLogging;
         private static Rect _quickToggleRect;
         private static float _nextScan;
         private static float _nextOffer;
@@ -43,36 +47,41 @@ namespace ErenshorPvP
         internal static bool ValidationLogging { get { return _validationLogging != null && _validationLogging.Value; } }
         internal static bool HasPending { get { return !string.IsNullOrEmpty(_pendingMatchId) && Time.unscaledTime < _pendingExpires; } }
 
-        internal static void Initialize(ConfigFile config)
+        internal static void Initialize(PvpSettings settings)
         {
-            _enabled = config.Bind("PvP", "Enabled", false, "Enable off-map PvP party challenges and lethal proxy combat outside protected zones.");
-            _arrangedEnabled = config.Bind("PvP", "ArrangedChallenges", true, "Allow consensual arranged challenges. These are the only PvP that asks first: you always get an Accept or Refuse prompt before one starts. Requires the main PvP toggle.");
-            _offerCooldownMinutes = config.Bind("PvP", "OfferCooldownMinutes", 12, "Global cooldown between incoming arranged offers or ambushes, clamped to 2-60 minutes.");
-            _ambushEnabled = config.Bind("Ambush", "Enabled", true, "Allow rare non-consensual attacks while the main PvP toggle is on. These never prompt; they simply begin. Protected zones and the scene allowlist are the only limits.");
-            _ambushZones = config.Bind("Ambush", "Zones", "Faerie's Brake, Hidden Hills, Bonepits, Krakengard", "Exact scene allowlist for wild ambushes. Empty means no automatic ambushes.");
-            _ambushMinimumMinutes = config.Bind("Ambush", "MinimumMinutes", 15, "Minimum minutes between natural ambush opportunities, clamped to 8-120.");
-            _ambushMaximumMinutes = config.Bind("Ambush", "MaximumMinutes", 35, "Maximum minutes between natural ambush opportunities, clamped to the minimum-240.");
-            _ambushChancePercent = config.Bind("Ambush", "OpportunityChancePercent", 50, "Chance that an eligible ambush opportunity becomes an ambush (5-100). Failed opportunities reschedule the full interval.");
-            _protectedZones = config.Bind("PvP", "ProtectedZones", "Port Azure, Stowaway's Step, Island Tomb, Tutorial, Character Select", "Protected scene names. Matching ignores spaces and punctuation.");
-            _highRiskZones = config.Bind("PvP", "HighRiskZones", string.Empty, "Exact scene names using the wider level range.");
-            _standardRange = config.Bind("PvP", "StandardLevelRange", 3, "Ordinary-zone level range, clamped to 1-10.");
-            _highRiskRange = config.Bind("PvP", "HighRiskLevelRange", 5, "High-risk-zone level range, clamped to 1-10.");
-            _panelOffsetX = config.Bind("UI", "PanelOffsetX", 0f,
-                "Persisted horizontal offset from the default upper-right panel position, matching the Party Tools convention. Updated when the panel finishes moving.");
-            _panelOffsetY = config.Bind("UI", "PanelOffsetY", 0f,
-                "Persisted vertical offset from the default position below the upper-right minimap area. Updated when the panel finishes moving.");
-            _showDebugTab = config.Bind("UI", "ShowTestTab", false, "Show the hidden TEST tab with force/verify/diagnose controls. Toggle in game with /epvp debug.");
-            _showQuickToggle = config.Bind("UI", "ShowQuickToggle", true, "Show the compact PvP on/off switch beside the minimap.");
-            _fullView = config.Bind("UI", "FullView", false,
-                "Open the panel with the tab bar and all detail views. When false the panel stays compact and shows only the master switch, zone safety, and anything awaiting a decision. Toggled by the panel's Full checkbox.");
-            _validationLogging = config.Bind("Debug", "ValidationLogging", true,
-                "Temporary detailed PvP acceptance logging. Turn off after validation with /epvp validation off; core failures and final results remain logged.");
-            PvpRewardService.Initialize(config);
-            PvpRecordService.Initialize(config);
+            _enabled = new PvpConfigEntry<bool>(() => settings.PvpEnabled, v => settings.PvpEnabled = v);
+            _arrangedEnabled = new PvpConfigEntry<bool>(() => settings.ArrangedChallenges, v => settings.ArrangedChallenges = v);
+            _offerCooldownMinutes = new PvpConfigEntry<int>(() => settings.OfferCooldownMinutes, v => settings.OfferCooldownMinutes = v);
+            _ambushEnabled = new PvpConfigEntry<bool>(() => settings.AmbushEnabled, v => settings.AmbushEnabled = v);
+            _ambushZones = new PvpConfigEntry<string>(() => settings.AmbushZones, v => settings.AmbushZones = v);
+            _ambushMinimumMinutes = new PvpConfigEntry<int>(() => settings.AmbushMinimumMinutes, v => settings.AmbushMinimumMinutes = v);
+            _ambushMaximumMinutes = new PvpConfigEntry<int>(() => settings.AmbushMaximumMinutes, v => settings.AmbushMaximumMinutes = v);
+            _ambushChancePercent = new PvpConfigEntry<int>(() => settings.AmbushOpportunityChancePercent, v => settings.AmbushOpportunityChancePercent = v);
+            _protectedZones = new PvpConfigEntry<string>(() => settings.ProtectedZones, v => settings.ProtectedZones = v);
+            _highRiskZones = new PvpConfigEntry<string>(() => settings.HighRiskZones, v => settings.HighRiskZones = v);
+            _standardRange = new PvpConfigEntry<int>(() => settings.StandardLevelRange, v => settings.StandardLevelRange = v);
+            _highRiskRange = new PvpConfigEntry<int>(() => settings.HighRiskLevelRange, v => settings.HighRiskLevelRange = v);
+            _panelOffsetX = new PvpConfigEntry<float>(() => settings.PanelOffsetX, v => settings.PanelOffsetX = v);
+            _panelOffsetY = new PvpConfigEntry<float>(() => settings.PanelOffsetY, v => settings.PanelOffsetY = v);
+            _showDebugTab = new PvpConfigEntry<bool>(() => settings.ShowTestTab, v => settings.ShowTestTab = v);
+            _showQuickToggle = new PvpConfigEntry<bool>(() => settings.ShowQuickToggle, v => settings.ShowQuickToggle = v);
+            _fullView = new PvpConfigEntry<bool>(() => settings.FullView, v => settings.FullView = v);
+            _validationLogging = new PvpConfigEntry<bool>(() => settings.ValidationLogging, v => settings.ValidationLogging = v);
+            PvpRewardService.Initialize(settings);
+            PvpRecordService.Initialize(settings);
             PvpPanel.ConfigurePosition(_panelOffsetX.Value, _panelOffsetY.Value, PersistPanelPosition);
             PvpPanel.ConfigureView(_fullView.Value, PersistFullView);
             _nextScan = Time.unscaledTime + 12f;
             ScheduleNextAmbush(Time.unscaledTime);
+        }
+
+        // Called after every settings mutation in this class and the two config-owning
+        // services it initializes, so native Lunaris config is actually written to disk
+        // (BepInEx's ConfigEntry persisted a .Value write on its own; Lunaris does not).
+        internal static void PersistSettings()
+        {
+            if (SaveSettings == null) return;
+            try { SaveSettings(); } catch { }
         }
 
         internal static void Tick()
@@ -163,7 +172,7 @@ namespace ErenshorPvP
             else if (option.Equals("off", StringComparison.OrdinalIgnoreCase)) { SetEnabled(false); }
             else if (option.Equals("debug", StringComparison.OrdinalIgnoreCase))
             {
-                if (_showDebugTab != null) _showDebugTab.Value = !_showDebugTab.Value;
+                if (_showDebugTab != null) { _showDebugTab.Value = !_showDebugTab.Value; PersistSettings(); }
                 if (ShowDebugTab) { _open = true; PvpPanel.SelectTab(PvpPanelTab.Debug); }
                 else PvpPanel.SelectTab(PvpPanelTab.Status);
                 Say("[Erenshor PvP] Test tab " + (ShowDebugTab ? "shown." : "hidden."));
@@ -289,6 +298,7 @@ namespace ErenshorPvP
         {
             if (_enabled == null) return;
             _enabled.Value = value;
+            PersistSettings();
             if (!value) ClearPending();
         }
 
@@ -296,6 +306,7 @@ namespace ErenshorPvP
         {
             if (_arrangedEnabled == null) return;
             _arrangedEnabled.Value = value;
+            PersistSettings();
             if (!value) ClearPending();
         }
 
@@ -303,6 +314,7 @@ namespace ErenshorPvP
         {
             if (_ambushEnabled == null) return;
             _ambushEnabled.Value = value;
+            PersistSettings();
             if (value) ScheduleNextAmbush(Time.unscaledTime);
         }
 
@@ -310,6 +322,7 @@ namespace ErenshorPvP
         {
             if (_ambushChancePercent == null) return;
             _ambushChancePercent.Value = Math.Max(5, Math.Min(100, AmbushChancePercent + (delta * 5)));
+            PersistSettings();
         }
 
         internal static void AdjustAmbushMinimum(int delta)
@@ -318,12 +331,14 @@ namespace ErenshorPvP
             _ambushMinimumMinutes.Value = Math.Max(8, Math.Min(120, AmbushMinimumMinutes + (delta * 5)));
             if (_ambushMaximumMinutes != null && _ambushMaximumMinutes.Value < _ambushMinimumMinutes.Value)
                 _ambushMaximumMinutes.Value = _ambushMinimumMinutes.Value;
+            PersistSettings();
         }
 
         internal static void AdjustAmbushMaximum(int delta)
         {
             if (_ambushMaximumMinutes == null) return;
             _ambushMaximumMinutes.Value = Math.Max(AmbushMinimumMinutes, Math.Min(240, AmbushMaximumMinutes + (delta * 5)));
+            PersistSettings();
         }
 
         internal static void ForceOffer(PvpEncounterMode mode, int attackers)
@@ -387,7 +402,7 @@ namespace ErenshorPvP
 
         private static void PersistFullView(bool value)
         {
-            try { if (_fullView != null) _fullView.Value = value; } catch { }
+            try { if (_fullView != null) { _fullView.Value = value; PersistSettings(); } } catch { }
         }
 
         // True while the cursor is over any PvP UI. The LeftClick patch uses this so a click
@@ -411,6 +426,7 @@ namespace ErenshorPvP
             {
                 if (_panelOffsetX != null) _panelOffsetX.Value = offsetX;
                 if (_panelOffsetY != null) _panelOffsetY.Value = offsetY;
+                PersistSettings();
             }
             catch { }
         }
@@ -527,13 +543,13 @@ namespace ErenshorPvP
 
         internal static void HideDebugTab()
         {
-            if (_showDebugTab != null) _showDebugTab.Value = false;
+            if (_showDebugTab != null) { _showDebugTab.Value = false; PersistSettings(); }
             PvpPanel.SelectTab(PvpPanelTab.Status);
         }
 
         internal static void ToggleValidationLogging()
         {
-            if (_validationLogging != null) _validationLogging.Value = !_validationLogging.Value;
+            if (_validationLogging != null) { _validationLogging.Value = !_validationLogging.Value; PersistSettings(); }
         }
 
         private static string SetValidationLogging(string option)
@@ -544,6 +560,7 @@ namespace ErenshorPvP
                 if (pieces[1].Equals("on", StringComparison.OrdinalIgnoreCase)) _validationLogging.Value = true;
                 else if (pieces[1].Equals("off", StringComparison.OrdinalIgnoreCase)) _validationLogging.Value = false;
                 else return "[Erenshor PvP] Usage: /epvp validation on|off";
+                PersistSettings();
             }
             return "[Erenshor PvP] Detailed validation logging " + (ValidationLogging ? "ON." : "OFF. Core failures and results still log.");
         }
@@ -732,6 +749,7 @@ namespace ErenshorPvP
                 if (!string.IsNullOrWhiteSpace(item) && Normalize(item) != Normalize(scene)) zones.Add(item.Trim());
             if (turnOn) zones.Add(scene);
             _ambushZones.Value = string.Join(", ", zones.ToArray());
+            PersistSettings();
             if (turnOn && _nextAmbush < Time.unscaledTime + 300f) _nextAmbush = Time.unscaledTime + 300f;
             return "[Erenshor PvP] Wild ambushes " + (turnOn ? "allowed" : "disabled") + " in " + scene + ".";
         }

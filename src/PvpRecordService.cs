@@ -1,32 +1,30 @@
-using BepInEx.Configuration;
-
 namespace ErenshorPvP
 {
     internal static class PvpRecordService
     {
-        private static ConfigEntry<int> _wins;
-        private static ConfigEntry<int> _losses;
-        private static ConfigEntry<int> _escapes;
-        private static ConfigEntry<string> _lastOpponent;
-        private static ConfigEntry<string> _lastResult;
-        private static ConfigEntry<int> _arrangedWins;
-        private static ConfigEntry<int> _arrangedLosses;
-        private static ConfigEntry<int> _ambushWins;
-        private static ConfigEntry<int> _ambushLosses;
-        private static ConfigEntry<string> _lastMode;
+        private static PvpConfigEntry<int> _wins;
+        private static PvpConfigEntry<int> _losses;
+        private static PvpConfigEntry<int> _escapes;
+        private static PvpConfigEntry<string> _lastOpponent;
+        private static PvpConfigEntry<string> _lastResult;
+        private static PvpConfigEntry<int> _arrangedWins;
+        private static PvpConfigEntry<int> _arrangedLosses;
+        private static PvpConfigEntry<int> _ambushWins;
+        private static PvpConfigEntry<int> _ambushLosses;
+        private static PvpConfigEntry<string> _lastMode;
 
-        internal static void Initialize(ConfigFile config)
+        internal static void Initialize(PvpSettings settings)
         {
-            _wins = config.Bind("Record", "Wins", 0, "Completed PvP victories.");
-            _losses = config.Bind("Record", "Losses", 0, "Completed PvP defeats.");
-            _escapes = config.Bind("Record", "Escapes", 0, "PvP matches ending by player flight or attacker retreat/disengage.");
-            _lastOpponent = config.Bind("Record", "LastOpponent", string.Empty, "Last completed PvP opponent.");
-            _lastResult = config.Bind("Record", "LastResult", string.Empty, "Last completed PvP result.");
-            _arrangedWins = config.Bind("Record", "ArrangedWins", 0, "Wins in accepted arranged PvP.");
-            _arrangedLosses = config.Bind("Record", "ArrangedLosses", 0, "Losses in accepted arranged PvP.");
-            _ambushWins = config.Bind("Record", "AmbushWins", 0, "Wild ambushes survived.");
-            _ambushLosses = config.Bind("Record", "AmbushLosses", 0, "Defeats in wild ambushes.");
-            _lastMode = config.Bind("Record", "LastMode", string.Empty, "Last completed PvP encounter mode.");
+            _wins = new PvpConfigEntry<int>(() => settings.RecordWins, v => settings.RecordWins = v);
+            _losses = new PvpConfigEntry<int>(() => settings.RecordLosses, v => settings.RecordLosses = v);
+            _escapes = new PvpConfigEntry<int>(() => settings.RecordEscapes, v => settings.RecordEscapes = v);
+            _lastOpponent = new PvpConfigEntry<string>(() => settings.LastOpponent, v => settings.LastOpponent = v);
+            _lastResult = new PvpConfigEntry<string>(() => settings.LastResult, v => settings.LastResult = v);
+            _arrangedWins = new PvpConfigEntry<int>(() => settings.ArrangedWins, v => settings.ArrangedWins = v);
+            _arrangedLosses = new PvpConfigEntry<int>(() => settings.ArrangedLosses, v => settings.ArrangedLosses = v);
+            _ambushWins = new PvpConfigEntry<int>(() => settings.AmbushWins, v => settings.AmbushWins = v);
+            _ambushLosses = new PvpConfigEntry<int>(() => settings.AmbushLosses, v => settings.AmbushLosses = v);
+            _lastMode = new PvpConfigEntry<string>(() => settings.LastMode, v => settings.LastMode = v);
         }
 
         internal static void Complete(string opponent, string result, PvpEncounterMode mode)
@@ -38,6 +36,7 @@ namespace ErenshorPvP
             _lastOpponent.Value = opponent ?? string.Empty;
             _lastResult.Value = result;
             _lastMode.Value = mode.ToString().ToLowerInvariant();
+            PvpController.PersistSettings();
         }
 
         // Panel accessors. Reading through these keeps the UI safe before Initialize runs.
@@ -52,8 +51,8 @@ namespace ErenshorPvP
         internal static string LastResult { get { return Read(_lastResult); } }
         internal static string LastMode { get { return Read(_lastMode); } }
 
-        private static int Read(ConfigEntry<int> entry) { return entry == null ? 0 : entry.Value; }
-        private static string Read(ConfigEntry<string> entry) { return entry == null ? string.Empty : entry.Value ?? string.Empty; }
+        private static int Read(PvpConfigEntry<int> entry) { return entry == null ? 0 : entry.Value; }
+        private static string Read(PvpConfigEntry<string> entry) { return entry == null ? string.Empty : entry.Value ?? string.Empty; }
 
         internal static string Describe()
         {
