@@ -2,7 +2,16 @@
 
 Standalone MMO-style PvP encounters for Erenshor. Practice Duels remains friendly, consensual, and non-lethal for Sims already in the zone. Erenshor PvP selects off-map Sim profiles and runs lethal encounters with normal player death and respawn. World PvP contains both consensual arranged matches and rare non-consensual wild ambushes.
 
-Current development line: 0.4.0. Remaining work is tracked in [docs/PVP_TODO.md](docs/PVP_TODO.md); the most important remaining gate is live in-game validation of native combat, visuals, rewards, and the Party Tools-style panel.
+Current development line: 0.5.0. Remaining work is tracked in [docs/PVP_TODO.md](docs/PVP_TODO.md); the most important remaining gate is live in-game validation of native combat, visuals, rewards, and the Party Tools-style panel.
+
+## Status: native Lunaris migration candidate
+
+This version has been migrated off BepInEx 5 onto native Lunaris. This is a
+loader/config/logging/lifecycle migration only — no eligibility, matchmaking, spawn,
+combat-containment, reward-calculation, or event-contract logic changed; every Harmony patch
+target has been re-verified against the currently installed `Assembly-CSharp.dll`. **Live
+in-game verification under Lunaris, including `/epvp selftest`, has not yet been done.** A legacy
+BepInEx release remains available in this repository's Git history for anyone still on BepInEx.
 
 ## Features
 
@@ -127,9 +136,15 @@ After acceptance passes, run `/epvp validation off`. Core failures and final let
 
 If anything misbehaves, use `/epvp despawn`; scene transitions and mod shutdown also clean up all temporary actors and cloned spells.
 
+## Installation
+
+This is a **native Lunaris plugin** — BepInEx is no longer required for this version. Requires
+Lunaris installed in your Erenshor install. The compiled DLL is placed directly in
+`<Erenshor>\plugins\ErenshorPvP.dll`; Lunaris manages enable/disable.
+
 ## Safety boundary
 
-Erenshor remains authoritative for gameplay AI. This mod chooses eligibility and builds bounded encounter actors, but no LLM chooses movement, attacks, spells, healing, targeting, loot, or equipment. The mod never directly edits Erenshor save files. Rewards use native live APIs and normal game saving; records and cooldowns use BepInEx configuration. Unknown actor, scene, or network state fails closed.
+Erenshor remains authoritative for gameplay AI. This mod chooses eligibility and builds bounded encounter actors, but no LLM chooses movement, attacks, spells, healing, targeting, loot, or equipment. The mod never directly edits Erenshor save files. Rewards use native live APIs and normal game saving; records and cooldowns use native Lunaris configuration. Unknown actor, scene, or network state fails closed.
 
 Native spawn research is documented in [docs/NATIVE_SPAWN_FINDINGS.md](docs/NATIVE_SPAWN_FINDINGS.md). The game's exposed `SimPlayer` spawners mutate persistent roster state, which is why combat uses a temporary NPC proxy plus disabled visual shell.
 

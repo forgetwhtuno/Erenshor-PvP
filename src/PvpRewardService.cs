@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using BepInEx.Configuration;
 using UnityEngine;
 
 namespace ErenshorPvP
@@ -11,21 +10,21 @@ namespace ErenshorPvP
     // writing a character-save file.
     internal static class PvpRewardService
     {
-        private static ConfigEntry<bool> _enabled;
-        private static ConfigEntry<float> _xpFraction;
-        private static ConfigEntry<int> _goldPerTwoLevels;
-        private static ConfigEntry<int> _cooldownMinutes;
-        private static ConfigEntry<long> _nextRewardUtcTicks;
-        private static ConfigEntry<int> _cosmeticChancePercent;
+        private static PvpConfigEntry<bool> _enabled;
+        private static PvpConfigEntry<float> _xpFraction;
+        private static PvpConfigEntry<int> _goldPerTwoLevels;
+        private static PvpConfigEntry<int> _cooldownMinutes;
+        private static PvpConfigEntry<long> _nextRewardUtcTicks;
+        private static PvpConfigEntry<int> _cosmeticChancePercent;
 
-        internal static void Initialize(ConfigFile config)
+        internal static void Initialize(PvpSettings settings)
         {
-            _enabled = config.Bind("Rewards", "Enabled", true, "Grant rewards only for a completed PvP proxy victory.");
-            _xpFraction = config.Bind("Rewards", "XpFractionOfLevel", 0.50f, "Fraction of the current level's XP threshold awarded on a victory (0.01-0.50).");
-            _goldPerTwoLevels = config.Bind("Rewards", "GoldPerTwoLevels", 1, "Gold per two player levels, rounded up (1-100).");
-            _cooldownMinutes = config.Bind("Rewards", "VictoryCooldownMinutes", 30, "Minimum time between reward-bearing PvP victories (5-240 minutes).");
-            _nextRewardUtcTicks = config.Bind("Rewards", "NextEligibleUtcTicks", 0L, "Internal anti-farm timestamp. Do not edit while a match is active.");
-            _cosmeticChancePercent = config.Bind("Rewards", "CosmeticChancePercent", 0, "Deprecated and ignored. Cosmetic rewards are disabled until a slot-safe native unlock API is verified.");
+            _enabled = new PvpConfigEntry<bool>(() => settings.RewardsEnabled, v => settings.RewardsEnabled = v);
+            _xpFraction = new PvpConfigEntry<float>(() => settings.XpFractionOfLevel, v => settings.XpFractionOfLevel = v);
+            _goldPerTwoLevels = new PvpConfigEntry<int>(() => settings.GoldPerTwoLevels, v => settings.GoldPerTwoLevels = v);
+            _cooldownMinutes = new PvpConfigEntry<int>(() => settings.VictoryCooldownMinutes, v => settings.VictoryCooldownMinutes = v);
+            _nextRewardUtcTicks = new PvpConfigEntry<long>(() => settings.NextEligibleUtcTicks, v => settings.NextEligibleUtcTicks = v);
+            _cosmeticChancePercent = new PvpConfigEntry<int>(() => settings.CosmeticChancePercent, v => settings.CosmeticChancePercent = v);
         }
 
         // Panel accessors.
@@ -91,6 +90,7 @@ namespace ErenshorPvP
                 GameData.PlayerInv.UpdatePlayerInventory();
 
                 _nextRewardUtcTicks.Value = DateTime.UtcNow.AddMinutes(Math.Max(5, Math.Min(240, _cooldownMinutes.Value))).Ticks;
+                PvpController.PersistSettings();
                 return "[Erenshor PvP] Victory rewards (" + opponentCount + " attackers, avg level " + Mathf.RoundToInt(averageOpponentLevel) + "): +" + xp + " XP and +" + gold + " gold.";
             }
             catch (Exception ex)

@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.5.0 - Native Lunaris migration
+
+- Migrated off BepInEx 5 onto native Lunaris: `BaseUnityPlugin`/`[BepInPlugin]`/`[BepInProcess]`/
+  `Logger` replaced by `LunarisPlugin`/`[LunarisPlugin]`/
+  `[LunarisPermission(Reflection | Harmony)]`/native `Logging`. `BepInEx.Configuration.ConfigFile`/
+  `ConfigEntry<T>` replaced by a new typed `PvpSettings` class (`[Config]` fields) plus a small
+  `PvpConfigEntry<T>` compatibility shim, so `PvpController`, `PvpRewardService`, and
+  `PvpRecordService` (previously three separate classes each taking a shared `ConfigFile`) needed
+  no changes beyond their field types and `Initialize` signatures. All 34 existing settings across
+  those three classes are preserved verbatim (section/key/default/description).
+- Native Lunaris config does not auto-persist a `.Value` write to disk the way BepInEx's
+  `ConfigEntry` did, so an explicit `PvpController.SaveSettings` hook (wired by the plugin to
+  `Config.Save()`, matching the pattern used in this author's Erenshor Nemesis migration) is now
+  called after every settings mutation: PvP/Ambush/UI/Debug toggles, ambush cadence adjustments,
+  panel position and full-view persistence, `/epvp ambushhere`, win/loss/escape record updates,
+  and the reward anti-farm cooldown timestamp.
+- This is a loader/config/logging/lifecycle migration only: no eligibility, matchmaking, spawn,
+  combat-containment, reward-calculation, or event-contract logic changed. Every Harmony patch
+  target was re-verified against the currently installed `Assembly-CSharp.dll`.
+- `BUILD_AND_INSTALL.ps1` rewritten for Lunaris: install target is now
+  `<Erenshor>\plugins\ErenshorPvP.dll`; reference resolution now looks for a Lunaris developer
+  folder (`Lunaris.dll`/`0Harmony.dll`) instead of a BepInEx profile root; all r2modman
+  BepInEx-profile auto-detection removed. The optional `../shared` cross-mod contract-conformance
+  compile step (shared with Erenshor Nemesis and Deep Sims) is unchanged.
+- Verified: real compile against the installed Erenshor + Lunaris assemblies, zero `BepInEx`
+  references in the compiled output, and a static hot-unload audit (the
+  `SceneManager.sceneLoaded`/`sceneUnloaded` subscriptions installed in `Awake()` are unsubscribed
+  in `OnDestroy()`; `Harmony.UnpatchSelf()` is called; `PvpController.Shutdown()` runs and
+  `PvpController.SaveSettings` is cleared before the plugin instance reference is released; the
+  `AppDomain.CurrentDomain.GetAssemblies()` usages in `PvpCompatibility` and `PvpEventContract`
+  are fresh per-call scans with no `AssemblyLoad` subscription to leak).
+- Not yet done: live in-game verification under Lunaris, including `/epvp selftest` (the existing
+  8-group deterministic policy suite is heavily entangled with Unity/game types across
+  `PvpCombatContainment`, `PvpTemporaryCloneFactory`, and `PvpPanel`, so unlike the smaller mods in
+  this migration series it was not practical to extract into a standalone outside-the-game test
+  runner for this pass — it must be run live via `/epvp selftest` as part of verification, same as
+  before this migration).
+
 - Added `shared/PvpContractConformance.cs`, compiled into PvP, Nemesis, and Deep Sims, pinning all three to one outcome-classification table and one result-row shape. `/epvp selftest` now runs it against `ClassifyOutcome` and against the live result queue. The shared file is optional at build time so a standalone copy of the mod still compiles.
 - `PvpSemanticEvent` now carries PvP's own `Classification` for terminal events, and `Publish` prefers a seven-field `NotifyPvpEvent` on the Deep Sims bridge, falling back to the six-field form for older builds. Consumers no longer re-derive a verdict from the raw reason token.
 - A match cancelled without a verdict now publishes `pvp_cancelled` with its match id instead of the housekeeping `pvp_proxy_despawned` event, which no consumer accepted, so zoning out of a fight is visible to social consumers.
