@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased - retained uGUI / Suite control migration
+
+- Replaced the production PvP IMGUI launcher/window with one persistent retained-uGUI canvas (`Canvas`/`CanvasScaler`/`GraphicRaycaster`, TMP, Buttons, ScrollRect/layout). Removed the PvP UI `PlayerControl.LeftClick` and `csMouseOrbit` Harmony workarounds; production UI no longer uses `OnGUI`, `GUI.Window`, `GUI.DragWindow`, native `DragUI`, or `EditUIMode`.
+- Added mod-owned EventSystem drag guards for the launcher grip and panel header. Owned drag sets `GameData.DraggingUIElement`, releases on drag end/pointer-up/disable/destroy/zoning/unload, persists normalized position once per completed gesture, and reclamps on resolution changes.
+- Added the dedicated STATUS/FIGHT/RULES/SCORE/optional DEBUG retained panel. Ordinary controls route through `PvpControlApi`; Flee requires a second confirmation click. Development spawn/despawn probes remain command-only. Matchmaking, proxy spawning, lethal combat, containment, reward, result, persistence, and opt-in semantics were not redesigned.
+- Added `showLauncher` Suite/Aura setting with fail-open fallback: if Hub is absent/unusable or this module bridge is not registered, the standalone launcher is forced visible. Hub status remains deliberately concise (`Enabled | Idle` / `Enabled | Match active`) to stay below the 240-character descriptor limit.
+- Added pure retained-UI geometry, launcher-visibility, and concise-status tests. Current-assembly compile/live Lunaris validation remains required before release.
+
 ## 0.5.0 - Native Lunaris migration
 
 - Migrated off BepInEx 5 onto native Lunaris: `BaseUnityPlugin`/`[BepInPlugin]`/`[BepInProcess]`/
@@ -140,3 +148,11 @@
 - Added a disabled Sim visual shell over the native combat body, with named Sim templates preferred when available.
 - Removed borrowed mob spells/skills/healing/pets/procs and added persistent win/loss/escape records.
 - Added protected startup/city/tutorial gates, a compact map-side toggle, and Party Tools-style persisted panel dragging.
+
+
+## Unreleased - Suite UI/API coherence handoff
+
+- Added optional, versioned `PvpControlApi` discovery/control surface for Suite Hub without a hard Hub dependency.
+- Kept standalone commands and core gameplay authority intact.
+- Documented the retained panel/launcher policy and Lunaris live-test requirement.
+- Reworked only panel/launcher interaction: runtime Rect now owns drag position, header-only drag persists after the gesture, and camera/target containment covers the full drag. PvP gameplay paths are unchanged.

@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$GameDir = "",
     [string]$LunarisLibDir = ""
 )
@@ -31,7 +31,8 @@ $GameDir = Find-Game $GameDir
 $LunarisLibDir = Find-LunarisLibDir $LunarisLibDir $GameDir
 $csc = Find-Csc; $managed = Join-Path $GameDir "Erenshor_Data\Managed"; $pluginDir = Join-Path $GameDir "plugins"
 New-Item -ItemType Directory -Force -Path $pluginDir | Out-Null
-$refs = @((Join-Path $LunarisLibDir "Lunaris.dll"),(Join-Path $LunarisLibDir "0Harmony.dll"),(Join-Path $managed "Assembly-CSharp.dll"),(Join-Path $managed "netstandard.dll"),(Join-Path $managed "UnityEngine.dll"),(Join-Path $managed "UnityEngine.CoreModule.dll"),(Join-Path $managed "UnityEngine.AIModule.dll"),(Join-Path $managed "UnityEngine.AnimationModule.dll"),(Join-Path $managed "UnityEngine.PhysicsModule.dll"),(Join-Path $managed "UnityEngine.UI.dll"),(Join-Path $managed "UnityEngine.IMGUIModule.dll"),(Join-Path $managed "UnityEngine.TextRenderingModule.dll"),(Join-Path $managed "UnityEngine.InputLegacyModule.dll"))
+$refs = @((Join-Path $LunarisLibDir "Lunaris.dll"),(Join-Path $LunarisLibDir "0Harmony.dll"),(Join-Path $managed "Assembly-CSharp.dll"),(Join-Path $managed "netstandard.dll"),(Join-Path $managed "UnityEngine.dll"),(Join-Path $managed "UnityEngine.CoreModule.dll"),
+    (Join-Path $managed "UnityEngine.UIModule.dll"),(Join-Path $managed "UnityEngine.AIModule.dll"),(Join-Path $managed "UnityEngine.AnimationModule.dll"),(Join-Path $managed "UnityEngine.PhysicsModule.dll"),(Join-Path $managed "UnityEngine.UI.dll"),(Join-Path $managed "UnityEngine.TextRenderingModule.dll"),(Join-Path $managed "UnityEngine.InputLegacyModule.dll"),(Join-Path $managed "Unity.TextMeshPro.dll"))
 foreach ($ref in $refs) { if (-not (Test-Path $ref)) { throw "Missing reference: $ref" } }
 $out = Join-Path $pluginDir "ErenshorPvP.dll"; $rsp = Join-Path $env:TEMP "ErenshorPvP.rsp"; $lines = @('/nologo','/target:library','/optimize+',('/out:"{0}"' -f $out)); $refs | ForEach-Object { $lines += ('/reference:"{0}"' -f $_) }; Get-ChildItem (Join-Path $ScriptRoot "src") -Filter "*.cs" | ForEach-Object { $lines += ('"' + $_.FullName + '"') }
 # Cross-mod contract conformance tests, shared with Erenshor Nemesis and Deep Sims. Optional so a
@@ -41,3 +42,4 @@ if (Test-Path $shared) { $lines += '/define:SHARED_CONTRACTS'; Get-ChildItem $sh
 $lines | Set-Content $rsp -Encoding ASCII
 & $csc "@$rsp"; if ($LASTEXITCODE -ne 0) { throw "Compilation failed." }
 Write-Host "Installed Erenshor PvP to $out" -ForegroundColor Green
+
