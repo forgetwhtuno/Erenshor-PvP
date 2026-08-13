@@ -73,8 +73,14 @@ namespace ErenshorPvP
         [Config("ShowTestTab", "UI", "Show the hidden TEST tab with force/verify/diagnose controls. Toggle in game with /epvp debug.")]
         public bool ShowTestTab = false;
 
-        [Config("ShowQuickToggle", "UI", "Show the compact PvP on/off switch beside the minimap.")]
+        [Config("ShowQuickToggle", "UI", "Show the compact draggable PvP launcher beside the minimap. Click opens/closes the full panel; the label shows the current master on/off state.")]
         public bool ShowQuickToggle = true;
+
+        [Config("LauncherX", "UI", "Persisted horizontal position of the compact PvP launcher. -1 uses the default upper-right position.")]
+        public float LauncherX = -1f;
+
+        [Config("LauncherY", "UI", "Persisted vertical position of the compact PvP launcher. -1 uses the default upper-right position.")]
+        public float LauncherY = -1f;
 
         [Config("FullView", "UI", "Open the panel with the tab bar and all detail views. When false the panel stays compact and shows only the master switch, zone safety, and anything awaiting a decision. Toggled by the panel's Full checkbox.")]
         public bool FullView = false;

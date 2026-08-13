@@ -29,9 +29,14 @@ namespace ErenshorPvP
         private static PvpConfigEntry<float> _panelOffsetY;
         private static PvpConfigEntry<bool> _showDebugTab;
         private static PvpConfigEntry<bool> _showQuickToggle;
+        private static PvpConfigEntry<float> _launcherX;
+        private static PvpConfigEntry<float> _launcherY;
         private static PvpConfigEntry<bool> _fullView;
         private static PvpConfigEntry<bool> _validationLogging;
         private static Rect _quickToggleRect;
+        private static PvpLauncher _launcher;
+        private static Rect _launcherRect;
+        private static bool _launcherRectInitialized;
         private static float _nextScan;
         private static float _nextOffer;
         private static float _nextAmbush;
@@ -65,8 +70,11 @@ namespace ErenshorPvP
             _panelOffsetY = new PvpConfigEntry<float>(() => settings.PanelOffsetY, v => settings.PanelOffsetY = v);
             _showDebugTab = new PvpConfigEntry<bool>(() => settings.ShowTestTab, v => settings.ShowTestTab = v);
             _showQuickToggle = new PvpConfigEntry<bool>(() => settings.ShowQuickToggle, v => settings.ShowQuickToggle = v);
+            _launcherX = new PvpConfigEntry<float>(() => settings.LauncherX, v => settings.LauncherX = v);
+            _launcherY = new PvpConfigEntry<float>(() => settings.LauncherY, v => settings.LauncherY = v);
             _fullView = new PvpConfigEntry<bool>(() => settings.FullView, v => settings.FullView = v);
             _validationLogging = new PvpConfigEntry<bool>(() => settings.ValidationLogging, v => settings.ValidationLogging = v);
+            _launcher = new PvpLauncher();
             PvpRewardService.Initialize(settings);
             PvpRecordService.Initialize(settings);
             PvpPanel.ConfigurePosition(_panelOffsetX.Value, _panelOffsetY.Value, PersistPanelPosition);
@@ -226,23 +234,67 @@ namespace ErenshorPvP
 
         internal static void Draw()
         {
-            if (!IsGameplayReady()) return;
-            DrawQuickToggle();
+            if (!IsGameplayReady())
+            {
+                _launcherRectInitialized = false;
+                _quickToggleRect = new Rect();
+                return;
+            }
+            DrawLauncher();
             if (!_open) return;
             PvpPanel.Draw();
         }
 
-        // Compact everyday control. The full panel remains available for offers,
-        // protected-zone status, and configuration details.
-        private static void DrawQuickToggle()
+        // Compact, draggable, persisted launcher matching the Journal/Contracts/Guild Life
+        // suite convention: a GUI.Window (not a raw control) so it always renders on top of
+        // any other mod's non-window IMGUI controls sharing this screen region. Clicking it
+        // opens/closes the full panel; the label reflects the master on/off state read-only,
+        // the same state /epvp on|off and the panel's own switch already control.
+        private static void DrawLauncher()
         {
             if (_showQuickToggle != null && !_showQuickToggle.Value) { _quickToggleRect = new Rect(); return; }
-            float width = 142f;
-            Rect area = new Rect(Math.Max(8f, Screen.width - width - PvpPanelPositioning.RightMargin), 82f, width, 27f);
-            _quickToggleRect = area;
-            bool toggled = GUI.Toggle(area, Enabled, " PvP " + (Enabled ? "ON" : "OFF"));
-            if (toggled == Enabled) return;
-            SetEnabled(toggled);
+            if (_launcher == null) _launcher = new PvpLauncher();
+            if (!_launcherRectInitialized)
+            {
+                _launcherRect = ResolveInitialLauncherRect();
+                _launcherRectInitialized = true;
+            }
+            Rect previous = _launcherRect;
+            _launcherRect = ClampLauncherRect(_launcher.Draw(_launcherRect, _open, Enabled));
+            if (!RectsNearlyEqual(previous, _launcherRect)) PersistLauncherRect();
+            _quickToggleRect = _launcherRect;
+            if (_launcher.RequestToggle) { if (_open) ClosePanel(); else _open = true; }
+        }
+
+        private static Rect ResolveInitialLauncherRect()
+        {
+            float x = _launcherX != null && _launcherX.Value >= 0f
+                ? _launcherX.Value
+                : Math.Max(8f, Screen.width - PvpLauncher.Width - PvpPanelPositioning.RightMargin);
+            float y = _launcherY != null && _launcherY.Value >= 0f ? _launcherY.Value : 82f;
+            return ClampLauncherRect(new Rect(x, y, PvpLauncher.Width, PvpLauncher.Height));
+        }
+
+        private static Rect ClampLauncherRect(Rect rect)
+        {
+            rect.width = PvpLauncher.Width;
+            rect.height = PvpLauncher.Height;
+            rect.x = Mathf.Clamp(rect.x, 0f, Mathf.Max(0f, Screen.width - rect.width));
+            rect.y = Mathf.Clamp(rect.y, 0f, Mathf.Max(0f, Screen.height - rect.height));
+            return rect;
+        }
+
+        private static void PersistLauncherRect()
+        {
+            if (_launcherX == null || _launcherY == null) return;
+            _launcherX.Value = _launcherRect.x;
+            _launcherY.Value = _launcherRect.y;
+            PersistSettings();
+        }
+
+        private static bool RectsNearlyEqual(Rect a, Rect b)
+        {
+            return Mathf.Abs(a.x - b.x) < 0.25f && Mathf.Abs(a.y - b.y) < 0.25f;
         }
 
         // Panel surface. The panel owns presentation only; every rule and side effect
@@ -475,7 +527,7 @@ namespace ErenshorPvP
         internal static void SceneTransition() { ClearPending(); PvpTemporaryCloneFactory.Despawn("scene_transition"); _nextScan = Time.unscaledTime + 12f; if (_nextAmbush < Time.unscaledTime + 300f) _nextAmbush = Time.unscaledTime + 300f; }
         // Restoring the camera explicitly matters: unpatching mid-frame could otherwise leave
         // the orbit speeds zeroed with no postfix left to put them back.
-        internal static void Shutdown() { ClearPending(); PvpTemporaryCloneFactory.Shutdown(); _open = false; PvpPanel.Dispose(); PvpCameraLookPatch.Restore(); }
+        internal static void Shutdown() { ClearPending(); PvpTemporaryCloneFactory.Shutdown(); _open = false; PvpPanel.Dispose(); PvpCameraLookPatch.Restore(); if (_launcher != null) { _launcher.Dispose(); _launcher = null; } _launcherRectInitialized = false; }
 
         private static string Plan(string option)
         {
