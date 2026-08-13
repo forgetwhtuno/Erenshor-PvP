@@ -25,19 +25,15 @@ namespace ErenshorPvP
         private static PvpConfigEntry<string> _highRiskZones;
         private static PvpConfigEntry<int> _standardRange;
         private static PvpConfigEntry<int> _highRiskRange;
-        private static PvpConfigEntry<float> _panelOffsetX;
-        private static PvpConfigEntry<float> _panelOffsetY;
+        private static PvpConfigEntry<float> _panelNormalizedX;
+        private static PvpConfigEntry<float> _panelNormalizedY;
         private static PvpConfigEntry<bool> _showDebugTab;
         private static PvpConfigEntry<bool> _showQuickToggle;
-        private static PvpConfigEntry<float> _launcherX;
-        private static PvpConfigEntry<float> _launcherY;
-        private static PvpConfigEntry<bool> _fullView;
+        private static PvpConfigEntry<float> _launcherNormalizedX;
+        private static PvpConfigEntry<float> _launcherNormalizedY;
         private static PvpConfigEntry<bool> _validationLogging;
-        private static Rect _quickToggleRect;
-        private static PvpLauncher _launcher;
-        private static Rect _launcherRect;
-        private static bool _launcherRectInitialized;
-        private static bool _pendingLauncherToggle;
+        private static bool _pendingExternalOpen;
+        private static bool _pendingExternalClose;
         private static float _nextScan;
         private static float _nextOffer;
         private static float _nextAmbush;
@@ -50,6 +46,7 @@ namespace ErenshorPvP
         private static bool _open;
 
         internal static bool Enabled { get { return _enabled != null && _enabled.Value; } }
+        internal static bool ShowLauncherPreference { get { return _showQuickToggle == null || _showQuickToggle.Value; } }
         internal static bool ValidationLogging { get { return _validationLogging != null && _validationLogging.Value; } }
         internal static bool HasPending { get { return !string.IsNullOrEmpty(_pendingMatchId) && Time.unscaledTime < _pendingExpires; } }
 
@@ -67,19 +64,16 @@ namespace ErenshorPvP
             _highRiskZones = new PvpConfigEntry<string>(() => settings.HighRiskZones, v => settings.HighRiskZones = v);
             _standardRange = new PvpConfigEntry<int>(() => settings.StandardLevelRange, v => settings.StandardLevelRange = v);
             _highRiskRange = new PvpConfigEntry<int>(() => settings.HighRiskLevelRange, v => settings.HighRiskLevelRange = v);
-            _panelOffsetX = new PvpConfigEntry<float>(() => settings.PanelOffsetX, v => settings.PanelOffsetX = v);
-            _panelOffsetY = new PvpConfigEntry<float>(() => settings.PanelOffsetY, v => settings.PanelOffsetY = v);
+            _panelNormalizedX = new PvpConfigEntry<float>(() => settings.PanelNormalizedX, v => settings.PanelNormalizedX = v);
+            _panelNormalizedY = new PvpConfigEntry<float>(() => settings.PanelNormalizedY, v => settings.PanelNormalizedY = v);
             _showDebugTab = new PvpConfigEntry<bool>(() => settings.ShowTestTab, v => settings.ShowTestTab = v);
             _showQuickToggle = new PvpConfigEntry<bool>(() => settings.ShowQuickToggle, v => settings.ShowQuickToggle = v);
-            _launcherX = new PvpConfigEntry<float>(() => settings.LauncherX, v => settings.LauncherX = v);
-            _launcherY = new PvpConfigEntry<float>(() => settings.LauncherY, v => settings.LauncherY = v);
-            _fullView = new PvpConfigEntry<bool>(() => settings.FullView, v => settings.FullView = v);
+            _launcherNormalizedX = new PvpConfigEntry<float>(() => settings.LauncherNormalizedX, v => settings.LauncherNormalizedX = v);
+            _launcherNormalizedY = new PvpConfigEntry<float>(() => settings.LauncherNormalizedY, v => settings.LauncherNormalizedY = v);
             _validationLogging = new PvpConfigEntry<bool>(() => settings.ValidationLogging, v => settings.ValidationLogging = v);
-            _launcher = new PvpLauncher();
             PvpRewardService.Initialize(settings);
             PvpRecordService.Initialize(settings);
-            PvpPanel.ConfigurePosition(_panelOffsetX.Value, _panelOffsetY.Value, PersistPanelPosition);
-            PvpPanel.ConfigureView(_fullView.Value, PersistFullView);
+            PvpPanel.ConfigurePosition(_panelNormalizedX.Value, _panelNormalizedY.Value, _launcherNormalizedX.Value, _launcherNormalizedY.Value, PersistPanelPosition, PersistLauncherPosition);
             _nextScan = Time.unscaledTime + 12f;
             ScheduleNextAmbush(Time.unscaledTime);
         }
@@ -102,13 +96,16 @@ namespace ErenshorPvP
                 return;
             }
             if (Input.GetKeyDown(KeyCode.F10)) { if (_open) ClosePanel(); else _open = true; }
-            // Consumed here (Update), never inside Draw()/OnGUI: mutating _open mid-OnGUI can
-            // desync IMGUI's Layout/Repaint bookkeeping for the frame that just requested it
-            // (the same class of bug Contracts hit with its board toggle).
-            if (_pendingLauncherToggle)
+            // Consume externally requested panel state on Update, outside retained-uGUI event callbacks.
+            if (_pendingExternalClose)
             {
-                _pendingLauncherToggle = false;
-                if (_open) ClosePanel(); else _open = true;
+                _pendingExternalClose = false;
+                ClosePanel();
+            }
+            if (_pendingExternalOpen)
+            {
+                _pendingExternalOpen = false;
+                _open = true;
             }
             float now = Time.unscaledTime;
             PvpTemporaryCloneFactory.Tick();
@@ -175,7 +172,7 @@ namespace ErenshorPvP
             _open = true;
             PvpPanel.ShowPendingChallenge();
             Publish("pvp_challenge", _pendingMatchId, _pendingName, scene, "arranged", flavor.Motive);
-            Say("[Erenshor PvP] ARRANGED: " + flavor.SystemLine + " Party of " + _pendingName + " (" + team.Members.Count + ") wishes to fight. Press F10 to accept or refuse.");
+            Say("[Erenshor PvP] ARRANGED: " + flavor.SystemLine + " Party of " + _pendingName + " (" + team.Members.Count + ") wishes to fight. Open the PvP panel or use /epvp accept|refuse.");
             Say("[PvP] Incoming: " + team.DescribeCompact());
             Say("[PvP] " + flavor.LeaderLine);
         }
@@ -241,73 +238,13 @@ namespace ErenshorPvP
             return true;
         }
 
-        internal static void Draw()
+        internal static void RefreshUi()
         {
-            if (!IsGameplayReady())
-            {
-                _launcherRectInitialized = false;
-                _quickToggleRect = new Rect();
-                return;
-            }
-            DrawLauncher();
-            if (!_open) return;
-            PvpPanel.Draw();
+            bool ready = IsGameplayReady();
+            bool showLauncher = SuiteLauncherPolicy.ShouldShow(ready, SuiteUiPolicy.IsHubAvailable(), SuiteBridgeRegistered, ShowLauncherPreference);
+            PvpPanel.Tick(ready && _open, showLauncher);
         }
 
-        // Compact, draggable, persisted launcher matching the Journal/Contracts/Guild Life
-        // suite convention: a GUI.Window (not a raw control) so it always renders on top of
-        // any other mod's non-window IMGUI controls sharing this screen region. Clicking it
-        // opens/closes the full panel; the label reflects the master on/off state read-only,
-        // the same state /epvp on|off and the panel's own switch already control.
-        private static void DrawLauncher()
-        {
-            if (_showQuickToggle != null && !_showQuickToggle.Value) { _quickToggleRect = new Rect(); return; }
-            if (_launcher == null) _launcher = new PvpLauncher();
-            if (!_launcherRectInitialized)
-            {
-                _launcherRect = ResolveInitialLauncherRect();
-                _launcherRectInitialized = true;
-            }
-            Rect previous = _launcherRect;
-            _launcherRect = ClampLauncherRect(_launcher.Draw(_launcherRect, _open, Enabled));
-            if (!RectsNearlyEqual(previous, _launcherRect)) PersistLauncherRect();
-            _quickToggleRect = _launcherRect;
-            if (_launcher.RequestToggle) _pendingLauncherToggle = true;
-        }
-
-        private static Rect ResolveInitialLauncherRect()
-        {
-            float x = _launcherX != null && _launcherX.Value >= 0f
-                ? _launcherX.Value
-                : Math.Max(8f, Screen.width - PvpLauncher.Width - PvpPanelPositioning.RightMargin);
-            float y = _launcherY != null && _launcherY.Value >= 0f ? _launcherY.Value : 82f;
-            return ClampLauncherRect(new Rect(x, y, PvpLauncher.Width, PvpLauncher.Height));
-        }
-
-        private static Rect ClampLauncherRect(Rect rect)
-        {
-            rect.width = PvpLauncher.Width;
-            rect.height = PvpLauncher.Height;
-            rect.x = Mathf.Clamp(rect.x, 0f, Mathf.Max(0f, Screen.width - rect.width));
-            rect.y = Mathf.Clamp(rect.y, 0f, Mathf.Max(0f, Screen.height - rect.height));
-            return rect;
-        }
-
-        private static void PersistLauncherRect()
-        {
-            if (_launcherX == null || _launcherY == null) return;
-            _launcherX.Value = _launcherRect.x;
-            _launcherY.Value = _launcherRect.y;
-            PersistSettings();
-        }
-
-        private static bool RectsNearlyEqual(Rect a, Rect b)
-        {
-            return Mathf.Abs(a.x - b.x) < 0.25f && Mathf.Abs(a.y - b.y) < 0.25f;
-        }
-
-        // Panel surface. The panel owns presentation only; every rule and side effect
-        // stays here so chat commands and UI clicks follow identical paths.
         internal static bool ArrangedEnabled { get { return _arrangedEnabled != null && _arrangedEnabled.Value; } }
         internal static bool AmbushEnabled { get { return _ambushEnabled != null && _ambushEnabled.Value; } }
         internal static bool ShowDebugTab { get { return _showDebugTab != null && _showDebugTab.Value; } }
@@ -353,6 +290,13 @@ namespace ErenshorPvP
                 if (defenders == 3) return "3-5";
                 return "5";
             }
+        }
+
+        internal static void SetShowLauncherPreference(bool value)
+        {
+            if (_showQuickToggle == null) return;
+            _showQuickToggle.Value = value;
+            PersistSettings();
         }
 
         internal static void SetEnabled(bool value)
@@ -451,6 +395,22 @@ namespace ErenshorPvP
 
         internal static string DiagnoseText() { return Diagnostics(); }
 
+        // Set by ErenshorPvPPlugin after PvpSuiteAuraProvider.Register() completes without
+        // throwing. Never assumed true merely because Suite Hub is present in-scene.
+        internal static bool SuiteBridgeRegistered;
+
+        internal static bool PanelOpen { get { return _open; } }
+        internal static void RequestOpenPanel() { _pendingExternalOpen = true; }
+        internal static void RequestClosePanel() { _pendingExternalClose = true; }
+        internal static void ResetPanelPosition() { PvpPanel.ResetPosition(); }
+        internal static void ResetLauncherPosition()
+        {
+            if (_launcherNormalizedX != null) _launcherNormalizedX.Value = PvpUiGeometry.Unset;
+            if (_launcherNormalizedY != null) _launcherNormalizedY.Value = PvpUiGeometry.Unset;
+            PvpPanel.ResetLauncherPosition();
+            PersistSettings();
+        }
+
         internal static void ClosePanel() { _open = false; PvpPanel.Close(); }
 
         private static string Countdown(float deadline)
@@ -461,35 +421,18 @@ namespace ErenshorPvP
             return Mathf.CeilToInt(seconds / 60f) + "m";
         }
 
-        private static void PersistFullView(bool value)
+        private static void PersistPanelPosition(float x, float y)
         {
-            try { if (_fullView != null) { _fullView.Value = value; PersistSettings(); } } catch { }
+            if (_panelNormalizedX != null) _panelNormalizedX.Value = x;
+            if (_panelNormalizedY != null) _panelNormalizedY.Value = y;
+            PersistSettings();
         }
 
-        // True while the cursor is over any PvP UI. The LeftClick patch uses this so a click
-        // on the panel cannot also reach the world and move the camera or drop the target.
-        internal static bool PointerIsOverUi()
+        private static void PersistLauncherPosition(float x, float y)
         {
-            try
-            {
-                if (!IsGameplayReady()) return false;
-                Vector3 mouse = Input.mousePosition;
-                Vector2 point = new Vector2(mouse.x, Screen.height - mouse.y);
-                if (_showQuickToggle != null && _showQuickToggle.Value && _quickToggleRect.Contains(point)) return true;
-                return _open && PvpPanel.PointerIsOverPanel(point);
-            }
-            catch { return false; }
-        }
-
-        private static void PersistPanelPosition(float offsetX, float offsetY)
-        {
-            try
-            {
-                if (_panelOffsetX != null) _panelOffsetX.Value = offsetX;
-                if (_panelOffsetY != null) _panelOffsetY.Value = offsetY;
-                PersistSettings();
-            }
-            catch { }
+            if (_launcherNormalizedX != null) _launcherNormalizedX.Value = x;
+            if (_launcherNormalizedY != null) _launcherNormalizedY.Value = y;
+            PersistSettings();
         }
 
         internal static string Status()
@@ -498,6 +441,17 @@ namespace ErenshorPvP
                 "; protected=" + IsProtectedScene(SceneManager.GetActiveScene().name) + "; coop_blocked=" + PvpCompatibility.IsCoopSession() +
                 "; ambush_allowed=" + AmbushAllowed(SceneManager.GetActiveScene().name) +
                 "; " + PvpRewardService.Describe() + "; " + PvpRecordService.Describe();
+        }
+
+        // Concise status for the Suite Hub descriptor, which validates status text to at most 240
+        // characters (see ErenshorSuiteHub's SuiteDescriptorValidation.ValidateModule). Status()
+        // above regularly exceeds that once PvpRewardService/PvpRecordService.Describe() are
+        // appended, which rejected the whole descriptor ("status too long") and hid PvP from the
+        // Hub entirely. Detailed match/combat/reward data belongs in the PvP panel, not the Hub
+        // summary line, so this intentionally reports only enabled state + a coarse activity word.
+        internal static string HubStatus()
+        {
+            return PvpHubPresentation.Build(Enabled, PvpTemporaryCloneFactory.HasActiveTeam);
         }
 
         internal static string SelfTest()
@@ -533,10 +487,9 @@ namespace ErenshorPvP
                 "; off_map_profiles=" + offMap + "; same_zone_profiles=" + sameZone + "; " + PvpTemporaryCloneFactory.DiagnosticStatus();
         }
 
-        internal static void SceneTransition() { ClearPending(); PvpTemporaryCloneFactory.Despawn("scene_transition"); _nextScan = Time.unscaledTime + 12f; if (_nextAmbush < Time.unscaledTime + 300f) _nextAmbush = Time.unscaledTime + 300f; }
-        // Restoring the camera explicitly matters: unpatching mid-frame could otherwise leave
-        // the orbit speeds zeroed with no postfix left to put them back.
-        internal static void Shutdown() { ClearPending(); PvpTemporaryCloneFactory.Shutdown(); _open = false; PvpPanel.Dispose(); PvpCameraLookPatch.Restore(); if (_launcher != null) { _launcher.Dispose(); _launcher = null; } _launcherRectInitialized = false; _pendingLauncherToggle = false; }
+        internal static void SceneTransition() { PvpPanel.ReleaseDrag(); ClearPending(); PvpTemporaryCloneFactory.Despawn("scene_transition"); _nextScan = Time.unscaledTime + 12f; if (_nextAmbush < Time.unscaledTime + 300f) _nextAmbush = Time.unscaledTime + 300f; }
+        // Hot unload releases retained UI, drag ownership, proxy state, and optional bridge state.
+        internal static void Shutdown() { ClearPending(); PvpTemporaryCloneFactory.Shutdown(); _open = false; PvpPanel.Dispose(); _pendingExternalOpen = false; _pendingExternalClose = false; SuiteBridgeRegistered = false; SuiteUiPolicy.Reset(); }
 
         private static string Plan(string option)
         {
@@ -763,15 +716,7 @@ namespace ErenshorPvP
         }
         private static bool IsGameplayReady()
         {
-            try
-            {
-                if (GameData.InCharSelect || GameData.PlayerControl == null || GameData.PlayerControl.Myself == null) return false;
-                Character player = GameData.PlayerControl.Myself;
-                if (player.MyStats == null || !player.gameObject.activeInHierarchy) return false;
-                string scene = SceneManager.GetActiveScene().name ?? string.Empty;
-                return scene.IndexOf("char", StringComparison.OrdinalIgnoreCase) < 0 && scene.IndexOf("select", StringComparison.OrdinalIgnoreCase) < 0;
-            }
-            catch { return false; }
+            return SuiteUiPolicy.IsGameplayReady();
         }
         private static bool IsZoning() { try { return GameData.Zoning; } catch { return true; } }
         private static int RangeForScene(string scene) { return IsListed(scene, _highRiskZones.Value) ? Clamp(_highRiskRange.Value) : Clamp(_standardRange.Value); }

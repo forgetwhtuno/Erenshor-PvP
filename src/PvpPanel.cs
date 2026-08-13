@@ -1,779 +1,637 @@
 using System;
 using System.Collections.Generic;
+using TMPro;
 using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
 
 namespace ErenshorPvP
 {
     internal enum PvpPanelTab { Status, Fight, Rules, Score, Debug }
 
-    // Party Tools-style PvP window: same palette, header drag, offset persistence, and
-    // upper-right anchoring below the minimap, so both mods read as one interface.
-    //
-    // The panel is compact by default and shows only what needs an answer right now: the
-    // master switch, the current zone's safety, a pending challenge, and a live fight. The
-    // FULL checkbox reveals the tab bar and every detail view. Layout runs through
-    // GUILayout inside an auto-sizing window, so a tab can grow without a manual height
-    // table, and long content scrolls rather than running off the screen.
+    // Production player UI. Retained uGUI only: one persistent Canvas, launcher, panel,
+    // scroll view and tab pages. Values update in place; polling never rebuilds the tree.
     internal static class PvpPanel
     {
-        private const int WindowId = 764317;
+        private const int SortingOrder = 520;
+        private const float PanelWidth = 470f;
+        private const float PanelHeight = 520f;
+        private const float HeaderHeight = 34f;
+        private const float TabHeight = 30f;
+        private const float LauncherWidth = 148f;
+        private const float LauncherHeight = 32f;
 
-        private static Texture2D _backgroundTexture;
-        private static Texture2D _borderTexture;
-        private static Texture2D _barTexture;
-        private static Texture2D _barBackTexture;
-        private static GUIStyle _windowStyle;
-        private static GUIStyle _titleStyle;
-        private static GUIStyle _nameStyle;
-        private static GUIStyle _valueStyle;
-        private static GUIStyle _blockedStyle;
-        private static GUIStyle _footerStyle;
-        private static GUIStyle _buttonStyle;
-        private static GUIStyle _tabStyle;
-        private static GUIStyle _activeTabStyle;
-        private static GUIStyle _toggleStyle;
-        private static GUIStyle _wrapStyle;
-        private static GUIStyle _subtleStyle;
-        private static GUIStyle _commandStyle;
-        private static GUIStyle _sectionStyle;
-        private static GUIStyle _closeStyle;
-
-        private static PvpPanelPositionState _positionState;
-        private static Action<bool> _persistFullView;
-        private static bool _fullView;
+        private static GameObject _root;
+        private static Canvas _canvas;
+        private static RectTransform _panel;
+        private static RectTransform _launcher;
+        private static RectTransform _header, _headerGrip, _closeRect, _tabs, _viewport, _content, _footer;
+        private static GameObject _panelObject;
+        private static GameObject _launcherObject;
+        private static TextMeshProUGUI _launcherText;
+        private static TextMeshProUGUI _titleText;
+        private static TextMeshProUGUI _statusText;
+        private static TextMeshProUGUI _resultText;
+        private static TextMeshProUGUI _pendingText;
+        private static TextMeshProUGUI _fightText;
+        private static TextMeshProUGUI _rulesText;
+        private static TextMeshProUGUI _scoreText;
+        private static TextMeshProUGUI _debugText;
+        private static Button _acceptButton;
+        private static Button _refuseButton;
+        private static Button _fleeButton;
+        private static Button _ambushHereButton;
+        private static Button _debugTabButton;
+        private static readonly Dictionary<PvpPanelTab, GameObject> Pages = new Dictionary<PvpPanelTab, GameObject>();
+        private static readonly Dictionary<PvpPanelTab, Button> TabButtons = new Dictionary<PvpPanelTab, Button>();
         private static PvpPanelTab _tab = PvpPanelTab.Status;
-        private static Rect _window = new Rect(0f, 0f, Width, 150f);
-        private static float _windowHeight = 150f;
-        private static Vector2 _scroll;
-        private static bool _dragging;
-        private static Vector2 _dragOffset;
+        private static bool _built;
+        private static bool _panelOpen;
+        private static bool _launcherVisible;
+        private static bool _fleeConfirm;
+        private static float _fleeConfirmUntil;
+        private static float _lastScreenWidth;
+        private static float _lastScreenHeight;
+        private static Action<float, float> _persistPanel;
+        private static Action<float, float> _persistLauncher;
+        private static float _panelNormX = PvpUiGeometry.Unset;
+        private static float _panelNormY = PvpUiGeometry.Unset;
+        private static float _launcherNormX = PvpUiGeometry.Unset;
+        private static float _launcherNormY = PvpUiGeometry.Unset;
 
-        private static int _debugAttackers = 2;
-        private static int _planDefenders = 1;
-        private static int _planAttackers = 3;
-        private static string _result = string.Empty;
-        private static PvpPanelTab _resultTab;
-        private static float _resultExpires;
-        private static readonly Dictionary<string, bool> Sections = new Dictionary<string, bool>(StringComparer.Ordinal);
+        internal static bool IsBuilt { get { return _built; } }
 
-        internal const float Width = 336f;
-        private const float HeaderHeight = 28f;
-        private const float ResultSeconds = 30f;
-        private const float MinimumScrollHeight = 150f;
-        private const float ReservedChrome = 250f;
-        private const int DragControlHint = 0x45F0117;
-        // Leaves the Full checkbox and close button clickable at the right of the header.
-        private const float DragHandleInset = 80f;
-
-        internal static void ConfigurePosition(float offsetX, float offsetY, Action<float, float> persist)
+        internal static void ConfigurePosition(float panelX, float panelY, float launcherX, float launcherY,
+            Action<float, float> persistPanel, Action<float, float> persistLauncher)
         {
-            _positionState = new PvpPanelPositionState(offsetX, offsetY, persist);
+            _panelNormX = PvpUiGeometry.InterpretStoredAxis(panelX);
+            _panelNormY = PvpUiGeometry.InterpretStoredAxis(panelY);
+            _launcherNormX = PvpUiGeometry.InterpretStoredAxis(launcherX);
+            _launcherNormY = PvpUiGeometry.InterpretStoredAxis(launcherY);
+            _persistPanel = persistPanel;
+            _persistLauncher = persistLauncher;
         }
 
-        internal static void ConfigureView(bool fullView, Action<bool> persist)
+        internal static void Tick(bool panelOpen, bool launcherVisible)
         {
-            _fullView = fullView;
-            _persistFullView = persist;
+            _panelOpen = panelOpen;
+            _launcherVisible = launcherVisible;
+            if (!SuiteUiPolicy.IsGameplayReady())
+            {
+                HideAll();
+                PvpDragGuard.ForceReleaseIfOwned();
+                return;
+            }
+            if (EventSystem.current == null)
+            {
+                HideAll();
+                PvpDragGuard.ForceReleaseIfOwned();
+                return;
+            }
+            if (!EnsureBuilt()) return;
+
+            if (_lastScreenWidth != Screen.width || _lastScreenHeight != Screen.height)
+            {
+                _lastScreenWidth = Screen.width;
+                _lastScreenHeight = Screen.height;
+                ClampAndApplyPositions(false);
+            }
+
+            _panelObject.SetActive(panelOpen);
+            _launcherObject.SetActive(launcherVisible);
+            if (!panelOpen) _fleeConfirm = false;
+            UpdateValues();
         }
 
-        internal static void ResetPosition()
+        internal static void ShowPendingChallenge()
         {
-            EnsurePositionState();
-            _positionState.Reset();
-            _window.x = 0f;
-            _window.y = 0f;
+            SelectTab(PvpPanelTab.Status);
         }
 
         internal static void SelectTab(PvpPanelTab tab)
         {
             _tab = tab;
-            // Tabs only exist in the full view, so asking for one implies opening it.
-            if (!_fullView) SetFullView(true);
+            ApplyTabVisibility();
         }
 
-        internal static void ShowPendingChallenge()
+        internal static void ResetPosition()
         {
-            // The compact view already carries the challenge card; do not force the full view on.
-            _tab = PvpPanelTab.Status;
+            _panelNormX = PvpUiGeometry.Unset;
+            _panelNormY = PvpUiGeometry.Unset;
+            if (_built) ApplyPanelPosition(false);
+            PersistPanelPosition();
         }
 
-        // True while the cursor is over the window, so the click can be kept out of the world.
-        internal static bool PointerIsOverPanel(Vector2 screenPoint)
+        internal static void ResetLauncherPosition()
         {
-            if (_dragging) return true;
-            return _window.width > 0f && _window.Contains(screenPoint);
-        }
-
-        internal static void Draw()
-        {
-            EnsureStyles();
-            EnsurePositionState();
-
-            float height = Mathf.Max(60f, _windowHeight);
-            PvpPanelPosition anchored = _positionState.ResolveAndRecover(Screen.width, Screen.height, Width, height);
-            _window = new Rect(anchored.X, anchored.Y, Width, height);
-
-            // Dragging is handled here, in screen space, rather than with GUI.DragWindow.
-            // The panel re-anchors from the persisted offsets every frame, so letting the
-            // window move itself fought that: the offsets were reverse-engineered from the
-            // moved rect, and a drag past a screen edge could clamp into a corner it could
-            // not be dragged back out of. The drag now writes the persisted position
-            // directly, which is the single source of truth.
-            HandleDrag(height);
-
-            int previousDepth = GUI.depth;
-            try
-            {
-                GUI.depth = -45;
-                Rect drawn = GUILayout.Window(WindowId, _window, DrawWindow, GUIContent.none, _windowStyle,
-                    new[] { GUILayout.Width(Width) });
-                // Only the auto-fitted height is adopted; position stays owned by HandleDrag.
-                _windowHeight = drawn.height;
-                _window.height = drawn.height;
-            }
-            finally
-            {
-                GUI.depth = previousDepth;
-            }
-        }
-
-        private static void HandleDrag(float height)
-        {
-            Event current = Event.current;
-            if (current == null) return;
-            int controlId = GUIUtility.GetControlID(DragControlHint, FocusType.Passive);
-            Rect handle = new Rect(_window.x, _window.y, Width - DragHandleInset, HeaderHeight);
-
-            if (current.type == EventType.MouseDown && current.button == 0 && handle.Contains(current.mousePosition))
-            {
-                GUIUtility.hotControl = controlId;
-                _dragging = true;
-                _dragOffset = current.mousePosition - new Vector2(_window.x, _window.y);
-                current.Use();
-                return;
-            }
-
-            // A drag owns the gesture until mouse-up even if the pointer leaves the panel.
-            if (GUIUtility.hotControl != controlId) return;
-
-            if (current.type == EventType.MouseDrag && _dragging)
-            {
-                PvpPanelPosition moved = _positionState.MoveTo(
-                    Screen.width, Screen.height, Width, height,
-                    current.mousePosition.x - _dragOffset.x,
-                    current.mousePosition.y - _dragOffset.y);
-                _window.x = moved.X;
-                _window.y = moved.Y;
-                current.Use();
-                return;
-            }
-
-            if (current.type == EventType.MouseUp && current.button == 0)
-            {
-                GUIUtility.hotControl = 0;
-                if (_dragging) _positionState.CommitIfMoved();
-                _dragging = false;
-                current.Use();
-            }
-        }
-
-        private static void DrawWindow(int id)
-        {
-            DrawHeader();
-            if (_fullView) DrawTabs();
-
-            if (!_fullView) DrawCompactBody();
-            else
-            {
-                float maxHeight = Mathf.Max(MinimumScrollHeight, Screen.height - ReservedChrome);
-                _scroll = GUILayout.BeginScrollView(_scroll, false, false,
-                    GUIStyle.none, GUI.skin.verticalScrollbar, GUIStyle.none,
-                    new[] { GUILayout.MaxHeight(maxHeight) });
-                DrawActiveTab();
-                GUILayout.EndScrollView();
-            }
-
-            GUILayout.Space(2f);
-            GUILayout.Label(FooterText(), _footerStyle);
-        }
-
-        private static void DrawHeader()
-        {
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("ERENSHOR PVP", _titleStyle);
-            GUILayout.FlexibleSpace();
-            bool full = GUILayout.Toggle(_fullView, " Full", _toggleStyle, new[] { GUILayout.Width(48f) });
-            if (full != _fullView) SetFullView(full);
-            if (GUILayout.Button("x", _closeStyle, new[] { GUILayout.Width(20f) })) PvpController.ClosePanel();
-            GUILayout.EndHorizontal();
-            GUILayout.Space(3f);
-        }
-
-        private static void SetFullView(bool value)
-        {
-            _fullView = value;
-            _scroll = Vector2.zero;
-            if (_persistFullView != null) _persistFullView(value);
-        }
-
-        private static void DrawTabs()
-        {
-            GUILayout.BeginHorizontal();
-            DrawTab("PVP", PvpPanelTab.Status);
-            DrawTab("FIGHT", PvpPanelTab.Fight);
-            DrawTab("RULES", PvpPanelTab.Rules);
-            DrawTab("SCORE", PvpPanelTab.Score);
-            if (PvpController.ShowDebugTab) DrawTab("TEST", PvpPanelTab.Debug);
-            GUILayout.EndHorizontal();
-            GUILayout.Space(4f);
-        }
-
-        private static void DrawTab(string label, PvpPanelTab tab)
-        {
-            bool active = _tab == tab;
-            if (GUILayout.Button(label, active ? _activeTabStyle : _tabStyle) && !active)
-            {
-                _tab = tab;
-                _scroll = Vector2.zero;
-            }
-        }
-
-        private static void DrawActiveTab()
-        {
-            if (PvpController.ShowDebugTab && _tab == PvpPanelTab.Debug) DrawDebugTab();
-            else if (_tab == PvpPanelTab.Fight) DrawFightTab();
-            else if (_tab == PvpPanelTab.Rules) DrawRulesTab();
-            else if (_tab == PvpPanelTab.Score) DrawScoreTab();
-            else DrawStatusTab();
-        }
-
-        // Compact view: the master switch, whether this zone can hurt you, and anything
-        // that is actually waiting on a decision. Nothing else.
-        private static void DrawCompactBody()
-        {
-            MasterToggle();
-            Row("Zone", PvpController.CurrentScene, false);
-            Row("Status", ZoneStatusText(), PvpController.IsProtectedHere);
-
-            if (PvpController.HasPending) PendingCard();
-            if (PvpTemporaryCloneFactory.HasActiveTeam) ActiveEncounterBlock(false);
-            ResultArea();
-        }
-
-        private static void DrawStatusTab()
-        {
-            MasterToggle();
-
-            bool enabled = PvpController.Enabled;
-            bool previous = GUI.enabled;
-            GUI.enabled = enabled;
-            // The consent difference is the one thing a player can genuinely get wrong, so
-            // each switch says what it does to you rather than only naming itself.
-            bool arranged = GUILayout.Toggle(PvpController.ArrangedEnabled, "     Arranged challenges", _toggleStyle);
-            if (arranged != PvpController.ArrangedEnabled) PvpController.SetArrangedEnabled(arranged);
-            GUILayout.Label("          You are asked to Accept or Refuse.", _subtleStyle);
-
-            bool ambush = GUILayout.Toggle(PvpController.AmbushEnabled, "     Wild ambushes", _toggleStyle);
-            if (ambush != PvpController.AmbushEnabled) PvpController.SetAmbushEnabled(ambush);
-            GUILayout.Label("          No warning. They simply begin.", _subtleStyle);
-            GUI.enabled = previous;
-
-            GUILayout.Space(4f);
-            Row("Zone", PvpController.CurrentScene, false);
-            Row("Status", ZoneStatusText(), PvpController.IsProtectedHere);
-            Row("Level range", "+/-" + PvpController.LevelRangeHere, false);
-
-            if (!PvpController.IsProtectedHere)
-            {
-                GUILayout.Space(3f);
-                if (GUILayout.Button(PvpController.AmbushZoneListedHere ? "Stop ambushes here" : "Allow ambushes here", _buttonStyle))
-                    Run(ToggleAmbushHere);
-            }
-
-            GUILayout.Space(4f);
-            if (PvpController.HasPending) PendingCard();
-            else Row("Challenge", "none pending", false);
-
-            if (PvpTemporaryCloneFactory.HasActiveTeam) ActiveEncounterBlock(false);
-
-            // Collapsed by default: reachable without the hidden TEST tab, but not clutter.
-            if (Section("panelopts", "PANEL", false))
-            {
-                int click = ButtonPair("Reset position", "Status");
-                if (click == 1) Run(ResetPositionText);
-                else if (click == 2) Run(PvpController.Status);
-            }
-
-            ResultArea();
-        }
-
-        private static string ResetPositionText()
-        {
-            ResetPosition();
-            return "[Erenshor PvP] Panel moved back to its default position.";
-        }
-
-        private static void MasterToggle()
-        {
-            bool enabled = PvpController.Enabled;
-            bool toggled = GUILayout.Toggle(enabled, enabled ? " World PvP: ON" : " World PvP: OFF", _toggleStyle);
-            if (toggled != enabled) PvpController.SetEnabled(toggled);
-        }
-
-        private static void PendingCard()
-        {
-            GUILayout.Space(3f);
-            PvpTeamPlan team = PvpController.PendingTeam;
-            PvpEncounterFlavor flavor = PvpController.PendingFlavor;
-            int members = team == null ? 1 : team.Members.Count;
-
-            Row("Challenge", "party of " + members + " - " + PvpController.PendingSecondsLeft + "s", true);
-            if (flavor != null) GUILayout.Label(flavor.LeaderLine, _wrapStyle);
-            if (team != null) GUILayout.Label(team.DescribeCompact(), _wrapStyle);
-
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Accept", _buttonStyle)) PvpController.Accept();
-            if (GUILayout.Button("Refuse", _buttonStyle)) PvpController.Refuse();
-            GUILayout.EndHorizontal();
-            GUILayout.Space(3f);
-        }
-
-        // Shared by the compact body and the FIGHT tab. `detailed` adds role/guild/spell
-        // lines that would be clutter in the compact view.
-        private static void ActiveEncounterBlock(bool detailed)
-        {
-            GUILayout.Space(3f);
-            Row("Encounter", PvpTemporaryCloneFactory.ActiveMode.ToString().ToLowerInvariant(), true);
-            if (detailed) Row("Motive", MotiveText(PvpTemporaryCloneFactory.ActiveMotive), false);
-
-            List<PvpRosterEntry> roster = PvpTemporaryCloneFactory.Roster();
-            for (int i = 0; i < roster.Count; i++)
-            {
-                PvpRosterEntry entry = roster[i];
-                Row(entry.Name + " L" + entry.Level + " " + entry.ClassName, entry.HealthText, !entry.Alive);
-                HealthBar(entry.HealthFraction, entry.Alive);
-                if (!detailed) continue;
-                GUILayout.Label(entry.Role.ToString().ToLowerInvariant() +
-                    " - " + (string.IsNullOrEmpty(entry.GuildId) ? "no guild" : entry.GuildId) +
-                    " - " + entry.KnownSpells + " spells", _subtleStyle);
-            }
-
-            Row("You", PvpController.PlayerHealthText, false);
-            GUILayout.Space(3f);
-            if (GUILayout.Button("Flee this fight", _buttonStyle)) Run(PvpTemporaryCloneFactory.Flee);
-        }
-
-        private static void DrawFightTab()
-        {
-            if (!PvpTemporaryCloneFactory.HasActiveTeam)
-            {
-                Row("Roster", "no active encounter", false);
-                GUILayout.Space(4f);
-                int idle = ButtonPair("Team", "Clone status");
-                if (idle == 1) Run(PvpController.TeamText);
-                else if (idle == 2) Run(PvpTemporaryCloneFactory.CloneStatus);
-                // Diagnose is most useful with nothing running: it reports why no offer fired.
-                idle = ButtonPair("Verify", "Diagnose");
-                if (idle == 1) Run(PvpController.VerifyText);
-                else if (idle == 2) Run(PvpController.DiagnoseText);
-                ResultArea();
-                return;
-            }
-
-            ActiveEncounterBlock(true);
-            GUILayout.Space(4f);
-            int click = ButtonPair("Verify", "Diagnose");
-            if (click == 1) Run(PvpController.VerifyText);
-            else if (click == 2) Run(PvpController.DiagnoseText);
-            click = ButtonPair("Team", "Clone status");
-            if (click == 1) Run(PvpController.TeamText);
-            else if (click == 2) Run(PvpTemporaryCloneFactory.CloneStatus);
-            if (GUILayout.Button("Despawn team (cleanup)", _commandStyle)) Run(DespawnManually);
-            ResultArea();
-        }
-
-        private static void DrawRulesTab()
-        {
-            Row("Level range", "+/-" + PvpController.LevelRangeHere, false);
-            Row("Your party", PvpController.DefenderCount + " (avg L" + PvpController.DefenderAverageLevel + ")", false);
-            Row("Attackers", PvpController.PartySizeRuleText, false);
-            Row("Next ambush", PvpController.NextAmbushText, false);
-            Row("Next offer", PvpController.NextOfferText, false);
-
-            if (Section("ambush", "AMBUSH CADENCE", true))
-            {
-                Stepper("Chance", PvpController.AmbushChancePercent + "%", PvpController.AdjustAmbushChance);
-                Stepper("Gap min", PvpController.AmbushMinimumMinutes + "m", PvpController.AdjustAmbushMinimum);
-                Stepper("Gap max", PvpController.AmbushMaximumMinutes + "m", PvpController.AdjustAmbushMaximum);
-                int click = ButtonPair(
-                    PvpController.AmbushZoneListedHere ? "Stop here" : "Allow here", "List zones");
-                if (click == 1) Run(ToggleAmbushHere);
-                else if (click == 2) Run(PvpController.AmbushZonesText);
-            }
-
-            if (Section("plan", "MATCH SIMULATOR", false))
-            {
-                Stepper("Defenders", _planDefenders.ToString(), AdjustPlanDefenders);
-                Stepper("Attackers", _planAttackers.ToString(), AdjustPlanAttackers);
-                if (GUILayout.Button("Simulate match", _commandStyle)) Run(SimulatePlan);
-            }
-
-            ResultArea();
-        }
-
-        private static void DrawScoreTab()
-        {
-            Row("Arranged", PvpRecordService.ArrangedWins + "W / " + PvpRecordService.ArrangedLosses + "L", false);
-            Row("Ambush", PvpRecordService.AmbushWins + "W / " + PvpRecordService.AmbushLosses + "L", false);
-            Row("Escaped", PvpRecordService.Escapes.ToString(), false);
-            Row("Last", LastMatchText(), false);
-
-            GUILayout.Space(4f);
-            if (PvpRewardService.RewardsEnabled)
-            {
-                Row("Victory reward", PvpRewardService.XpPercent + "% XP + gold", false);
-                int remaining = PvpRewardService.CooldownMinutesRemaining;
-                Row("Reward cooldown", remaining == 0 ? "ready" : remaining + "m", remaining > 0);
-            }
-            else Row("Victory reward", "disabled", true);
-
-            Row("Cosmetic drop", PvpRewardService.CosmeticChancePercent + "% chance", false);
-            Row("Cosmetic slots", PvpRewardService.CosmeticSlotStatus, PvpRewardService.CosmeticSlotStatus != "available");
-        }
-
-        // Every /epvp command has a control here, so the chat syntax is never required.
-        private static void DrawDebugTab()
-        {
-            if (Section("encounter", "ENCOUNTER", true))
-            {
-                Stepper("Attackers", _debugAttackers.ToString(), AdjustDebugAttackers);
-                int click = ButtonPair("Force arranged", "Force ambush");
-                if (click == 1) PvpController.ForceOffer(PvpEncounterMode.Arranged, _debugAttackers);
-                else if (click == 2) PvpController.ForceOffer(PvpEncounterMode.Ambush, _debugAttackers);
-
-                click = ButtonPair("Accept", "Refuse");
-                if (click == 1) PvpController.Accept();
-                else if (click == 2) PvpController.Refuse();
-
-                click = ButtonPair("Team", "Clone status");
-                if (click == 1) Run(PvpController.TeamText);
-                else if (click == 2) Run(PvpTemporaryCloneFactory.CloneStatus);
-
-                click = ButtonPair("Flee", "Despawn");
-                if (click == 1) Run(PvpTemporaryCloneFactory.Flee);
-                else if (click == 2) Run(DespawnManually);
-            }
-
-            if (Section("inspect", "INSPECT", false))
-            {
-                int click = ButtonPair("Verify", "Diagnose");
-                if (click == 1) Run(PvpController.VerifyText);
-                else if (click == 2) Run(PvpController.DiagnoseText);
-
-                click = ButtonPair("Status", "Self test");
-                if (click == 1) Run(PvpController.Status);
-                else if (click == 2) Run(SelfTestText);
-
-                bool validation = GUILayout.Toggle(PvpController.ValidationLogging, "     Detailed validation logging", _toggleStyle);
-                if (validation != PvpController.ValidationLogging) PvpController.ToggleValidationLogging();
-
-                if (GUILayout.Button("Spawn probe", _commandStyle)) Run(PvpSpawnCapability.InspectLiveState);
-            }
-
-            if (Section("clones", "ISOLATED CLONE TESTS", false))
-            {
-                int click = ButtonPair("Spawn clone", "Target clone");
-                if (click == 1) Run(SpawnVisualCloneText);
-                else if (click == 2) Run(PvpTemporaryCloneFactory.BeginTargetingTest);
-                if (GUILayout.Button("Fight clone", _commandStyle)) Run(PvpTemporaryCloneFactory.BeginLethalFight);
-            }
-
-            if (Section("panel", "PANEL", false))
-            {
-                int click = ButtonPair("Hide test tab", "Reset position");
-                if (click == 1) PvpController.HideDebugTab();
-                else if (click == 2) ResetPosition();
-            }
-
-            ResultArea();
-        }
-
-        private static string DespawnManually() { return PvpTemporaryCloneFactory.Despawn("manual"); }
-        private static string SpawnVisualCloneText() { return PvpTemporaryCloneFactory.SpawnVisualClone(); }
-        private static string SelfTestText() { return "[Erenshor PvP] " + PvpController.SelfTest(); }
-        private static string ToggleAmbushHere() { return PvpController.SetAmbushHere(!PvpController.AmbushZoneListedHere); }
-        private static string SimulatePlan() { return PvpController.PlanText(_planDefenders, _planAttackers, 0, 0); }
-        private static void AdjustDebugAttackers(int delta) { _debugAttackers = Math.Max(1, Math.Min(5, _debugAttackers + delta)); }
-        private static void AdjustPlanDefenders(int delta) { _planDefenders = Math.Max(1, Math.Min(5, _planDefenders + delta)); }
-        private static void AdjustPlanAttackers(int delta) { _planAttackers = Math.Max(1, Math.Min(5, _planAttackers + delta)); }
-
-        // Command output goes to the social log as usual and is mirrored in the panel, so a
-        // button press is still readable while the panel covers the chat area.
-        private static void Run(Func<string> action)
-        {
-            if (action == null) return;
-            string output;
-            try { output = action(); }
-            catch (Exception ex) { output = "[Erenshor PvP] Command failed: " + ex.GetType().Name + "."; }
-            _result = output ?? string.Empty;
-            _resultTab = _tab;
-            _resultExpires = Time.unscaledTime + ResultSeconds;
-            PvpController.Say(_result);
-        }
-
-        private static void ResultArea()
-        {
-            if (string.IsNullOrEmpty(_result)) return;
-            if (_fullView && _resultTab != _tab) return;
-            if (Time.unscaledTime > _resultExpires) return;
-            GUILayout.Space(4f);
-            GUILayout.Label(_result.Replace("[Erenshor PvP] ", string.Empty), _wrapStyle);
-        }
-
-        // Collapsible group header. Returns true when the body should be drawn.
-        private static bool Section(string key, string title, bool defaultOpen)
-        {
-            bool open;
-            if (!Sections.TryGetValue(key, out open))
-            {
-                open = defaultOpen;
-                Sections[key] = open;
-            }
-            GUILayout.Space(3f);
-            if (GUILayout.Button((open ? "- " : "+ ") + title, _sectionStyle))
-            {
-                open = !open;
-                Sections[key] = open;
-            }
-            return open;
-        }
-
-        private static void Row(string label, string value, bool warn)
-        {
-            GUILayout.BeginHorizontal();
-            GUILayout.Label(label, _nameStyle);
-            GUILayout.FlexibleSpace();
-            GUILayout.Label(value, warn ? _blockedStyle : _valueStyle);
-            GUILayout.EndHorizontal();
-        }
-
-        private static void HealthBar(float fraction, bool alive)
-        {
-            Rect bar = GUILayoutUtility.GetRect(10f, 4f, new[] { GUILayout.ExpandWidth(true) });
-            if (Event.current == null || Event.current.type != EventType.Repaint) return;
-            GUI.DrawTexture(bar, _barBackTexture);
-            if (alive && fraction > 0f)
-                GUI.DrawTexture(new Rect(bar.x, bar.y, bar.width * fraction, bar.height), _barTexture);
-        }
-
-        // Returns 0 for no click, 1 for the left button, 2 for the right.
-        private static int ButtonPair(string left, string right)
-        {
-            int clicked = 0;
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button(left, _commandStyle)) clicked = 1;
-            if (GUILayout.Button(right, _commandStyle)) clicked = 2;
-            GUILayout.EndHorizontal();
-            return clicked;
-        }
-
-        private static void Stepper(string label, string value, Action<int> adjust)
-        {
-            GUILayout.BeginHorizontal();
-            GUILayout.Label(label, _nameStyle);
-            GUILayout.FlexibleSpace();
-            if (GUILayout.Button("-", _commandStyle, new[] { GUILayout.Width(24f) }) && adjust != null) adjust(-1);
-            GUILayout.Label(value, _valueStyle, new[] { GUILayout.Width(46f) });
-            if (GUILayout.Button("+", _commandStyle, new[] { GUILayout.Width(24f) }) && adjust != null) adjust(1);
-            GUILayout.EndHorizontal();
-        }
-
-        private static string ZoneStatusText()
-        {
-            if (PvpController.IsProtectedHere) return "protected";
-            if (PvpController.AmbushAllowedHere) return "ambush enabled";
-            return "arranged only";
-        }
-
-        private static string MotiveText(string motive)
-        {
-            return string.IsNullOrEmpty(motive) ? "none" : motive.Replace('_', ' ');
-        }
-
-        private static string LastMatchText()
-        {
-            string opponent = PvpRecordService.LastOpponent;
-            if (string.IsNullOrEmpty(opponent)) return "no matches yet";
-            string result = PvpRecordService.LastResult;
-            if (result == "proxy_death") result = "win";
-            else if (result == "player_death") result = "loss";
-            else if (result == "player_fled") result = "fled";
-            return opponent + " (" + result + ")";
-        }
-
-        private static string FooterText()
-        {
-            if (PvpController.HasPending) return "Arranged challenge - Accept or Refuse";
-            if (!_fullView) return "F10 closes - tick Full for tabs and controls";
-            if (PvpController.ShowDebugTab && _tab == PvpPanelTab.Debug) return "Test controls - /epvp debug hides this tab";
-            if (_tab == PvpPanelTab.Fight) return "Live proxy state; refreshes each frame";
-            if (_tab == PvpPanelTab.Rules) return "Changes save to config immediately";
-            if (_tab == PvpPanelTab.Score) return "Rewards require a completed proxy victory";
-            return "Drag the title bar to move this panel";
+            _launcherNormX = PvpUiGeometry.Unset;
+            _launcherNormY = PvpUiGeometry.Unset;
+            if (_built) ApplyLauncherPosition(false);
+            PersistLauncherPosition();
         }
 
         internal static void Close()
         {
-            if (_positionState != null) _positionState.CommitIfMoved();
-            _dragging = false;
+            _panelOpen = false;
+            if (_panelObject != null) _panelObject.SetActive(false);
+            PvpDragGuard.ForceReleaseIfOwned();
+            _fleeConfirm = false;
+        }
+
+        internal static void ReleaseDrag()
+        {
+            PvpDragGuard.ForceReleaseIfOwned();
         }
 
         internal static void Dispose()
         {
-            Close();
-            DestroyTexture(ref _backgroundTexture);
-            DestroyTexture(ref _borderTexture);
-            DestroyTexture(ref _barTexture);
-            DestroyTexture(ref _barBackTexture);
-            _windowStyle = null; _titleStyle = null; _nameStyle = null; _valueStyle = null;
-            _blockedStyle = null; _footerStyle = null; _buttonStyle = null; _tabStyle = null;
-            _activeTabStyle = null; _toggleStyle = null; _wrapStyle = null; _subtleStyle = null;
-            _commandStyle = null; _sectionStyle = null; _closeStyle = null;
-        }
-
-        private static void EnsurePositionState()
-        {
-            if (_positionState == null) _positionState = new PvpPanelPositionState(0f, 0f, null);
-        }
-
-        private static void EnsureStyles()
-        {
-            if (_windowStyle != null && _backgroundTexture != null && _borderTexture != null &&
-                _barTexture != null && _barBackTexture != null) return;
-
-            if (_backgroundTexture == null) _backgroundTexture = MakeTexture(new Color(0.035f, 0.055f, 0.065f, 0.92f));
-            if (_borderTexture == null) _borderTexture = MakeTexture(new Color(0.48f, 0.76f, 0.78f, 0.90f));
-            if (_barTexture == null) _barTexture = MakeTexture(new Color(0.68f, 0.94f, 0.86f, 0.92f));
-            if (_barBackTexture == null) _barBackTexture = MakeTexture(new Color(0.14f, 0.20f, 0.22f, 0.85f));
-
-            _windowStyle = new GUIStyle(GUI.skin.window);
-            _windowStyle.normal.background = _backgroundTexture;
-            _windowStyle.onNormal.background = _backgroundTexture;
-            _windowStyle.border = new RectOffset(1, 1, 1, 1);
-            _windowStyle.padding = new RectOffset(12, 12, 8, 9);
-
-            _titleStyle = new GUIStyle(GUI.skin.label);
-            _titleStyle.fontSize = 14;
-            _titleStyle.fontStyle = FontStyle.Bold;
-            _titleStyle.clipping = TextClipping.Clip;
-            _titleStyle.normal.textColor = new Color(0.82f, 0.96f, 0.97f, 1f);
-
-            _nameStyle = new GUIStyle(GUI.skin.label);
-            _nameStyle.fontSize = 12;
-            _nameStyle.clipping = TextClipping.Clip;
-            _nameStyle.normal.textColor = new Color(0.88f, 0.92f, 0.91f, 1f);
-
-            _valueStyle = new GUIStyle(GUI.skin.label);
-            _valueStyle.fontSize = 12;
-            _valueStyle.fontStyle = FontStyle.Bold;
-            _valueStyle.alignment = TextAnchor.MiddleRight;
-            _valueStyle.clipping = TextClipping.Clip;
-            _valueStyle.normal.textColor = new Color(0.68f, 0.94f, 0.86f, 1f);
-
-            _blockedStyle = new GUIStyle(_valueStyle);
-            _blockedStyle.normal.textColor = new Color(0.95f, 0.82f, 0.56f, 1f);
-
-            _footerStyle = new GUIStyle(GUI.skin.label);
-            _footerStyle.fontSize = 10;
-            _footerStyle.clipping = TextClipping.Clip;
-            _footerStyle.normal.textColor = new Color(0.66f, 0.76f, 0.76f, 0.95f);
-
-            _buttonStyle = new GUIStyle(GUI.skin.button);
-            _buttonStyle.fontSize = 12;
-            _buttonStyle.fontStyle = FontStyle.Bold;
-            _buttonStyle.padding = new RectOffset(8, 8, 4, 4);
-            _buttonStyle.normal.textColor = new Color(0.82f, 0.96f, 0.97f, 1f);
-
-            _tabStyle = new GUIStyle(GUI.skin.button);
-            _tabStyle.fontSize = 11;
-            _tabStyle.padding = new RectOffset(2, 2, 3, 3);
-            _tabStyle.margin = new RectOffset(1, 1, 0, 0);
-            _tabStyle.normal.textColor = new Color(0.66f, 0.76f, 0.76f, 0.95f);
-
-            _activeTabStyle = new GUIStyle(_tabStyle);
-            _activeTabStyle.fontStyle = FontStyle.Bold;
-            _activeTabStyle.normal.textColor = new Color(0.82f, 0.96f, 0.97f, 1f);
-
-            _commandStyle = new GUIStyle(GUI.skin.button);
-            _commandStyle.fontSize = 11;
-            _commandStyle.padding = new RectOffset(3, 3, 3, 3);
-            _commandStyle.normal.textColor = new Color(0.82f, 0.96f, 0.97f, 1f);
-
-            _closeStyle = new GUIStyle(_tabStyle);
-            _closeStyle.fontStyle = FontStyle.Bold;
-
-            _toggleStyle = new GUIStyle(GUI.skin.toggle);
-            _toggleStyle.fontSize = 12;
-            _toggleStyle.clipping = TextClipping.Clip;
-            _toggleStyle.normal.textColor = new Color(0.88f, 0.92f, 0.91f, 1f);
-            _toggleStyle.onNormal.textColor = new Color(0.82f, 0.96f, 0.97f, 1f);
-
-            _sectionStyle = new GUIStyle(GUI.skin.label);
-            _sectionStyle.fontSize = 10;
-            _sectionStyle.fontStyle = FontStyle.Bold;
-            _sectionStyle.clipping = TextClipping.Clip;
-            _sectionStyle.alignment = TextAnchor.MiddleLeft;
-            _sectionStyle.normal.textColor = new Color(0.48f, 0.76f, 0.78f, 1f);
-            _sectionStyle.hover.textColor = new Color(0.82f, 0.96f, 0.97f, 1f);
-
-            _wrapStyle = new GUIStyle(GUI.skin.label);
-            _wrapStyle.fontSize = 11;
-            _wrapStyle.wordWrap = true;
-            _wrapStyle.normal.textColor = new Color(0.80f, 0.86f, 0.86f, 1f);
-
-            _subtleStyle = new GUIStyle(GUI.skin.label);
-            _subtleStyle.fontSize = 10;
-            _subtleStyle.clipping = TextClipping.Clip;
-            _subtleStyle.normal.textColor = new Color(0.62f, 0.72f, 0.73f, 0.95f);
-        }
-
-        private static Texture2D MakeTexture(Color color)
-        {
-            Texture2D texture = new Texture2D(1, 1, TextureFormat.RGBA32, false);
-            texture.hideFlags = HideFlags.HideAndDontSave;
-            texture.SetPixel(0, 0, color);
-            texture.Apply();
-            return texture;
-        }
-
-        private static void DestroyTexture(ref Texture2D texture)
-        {
-            if (texture == null) return;
-            UnityEngine.Object.Destroy(texture);
-            texture = null;
+            PvpDragGuard.ForceReleaseIfOwned();
+            Pages.Clear();
+            TabButtons.Clear();
+            if (_root != null)
+            {
+                try { UnityEngine.Object.DestroyImmediate(_root); } catch { }
+            }
+            _root = null; _canvas = null; _panel = null; _launcher = null;
+            _header = _headerGrip = _closeRect = _tabs = _viewport = _content = _footer = null;
+            _panelObject = null; _launcherObject = null; _launcherText = null;
+            _titleText = null; _statusText = null; _resultText = null; _pendingText = null;
+            _fightText = null; _rulesText = null; _scoreText = null; _debugText = null;
+            _acceptButton = null; _refuseButton = null; _fleeButton = null; _ambushHereButton = null; _debugTabButton = null;
+            _built = false; _panelOpen = false; _launcherVisible = false; _fleeConfirm = false;
         }
 
         internal static string RunSelfTests()
         {
-            string positioning = PvpPanelPositioning.RunSelfTests();
-            if (!positioning.StartsWith("PASS", StringComparison.Ordinal)) return positioning;
-            if (MotiveText("camp_claim") != "camp claim") return "FAIL motive text";
-            if (MotiveText(string.Empty) != "none") return "FAIL empty motive text";
-
-            int attackers = _debugAttackers;
-            _debugAttackers = 1; AdjustDebugAttackers(-1);
-            if (_debugAttackers != 1) return "FAIL attacker lower bound";
-            _debugAttackers = 5; AdjustDebugAttackers(1);
-            if (_debugAttackers != 5) return "FAIL attacker upper bound";
-            _debugAttackers = attackers;
-
-            int defenders = _planDefenders, planAttackers = _planAttackers;
-            _planDefenders = 1; AdjustPlanDefenders(-1);
-            if (_planDefenders != 1) return "FAIL plan defender lower bound";
-            _planAttackers = 5; AdjustPlanAttackers(1);
-            if (_planAttackers != 5) return "FAIL plan attacker upper bound";
-            _planDefenders = defenders; _planAttackers = planAttackers;
-            return "PASS pvp panel";
+            string a = PvpUiGeometry.RunSelfTests();
+            string b = SuiteLauncherPolicy.RunSelfTests();
+            return a.StartsWith("PASS", StringComparison.Ordinal) && b.StartsWith("PASS", StringComparison.Ordinal)
+                ? "PASS:pvp_retained_ui_geometry_launcher_policy"
+                : "FAIL:" + a + ";" + b;
         }
+
+        private static bool EnsureBuilt()
+        {
+            if (_built) return true;
+            if (EventSystem.current == null) return false;
+            try
+            {
+                _root = new GameObject("ErenshorPvP.RetainedUI");
+                UnityEngine.Object.DontDestroyOnLoad(_root);
+                _canvas = _root.AddComponent<Canvas>();
+                _canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+                _canvas.overrideSorting = true;
+                _canvas.sortingOrder = SortingOrder;
+                CanvasScaler scaler = _root.AddComponent<CanvasScaler>();
+                scaler.uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
+                scaler.scaleFactor = 1f;
+                _root.AddComponent<GraphicRaycaster>();
+
+                BuildLauncher();
+                BuildPanel();
+                _lastScreenWidth = Screen.width;
+                _lastScreenHeight = Screen.height;
+                ClampAndApplyPositions(false);
+                ApplyTabVisibility();
+                _built = true;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                try { UnityEngine.Object.DestroyImmediate(_root); } catch { }
+                _root = null; _built = false;
+                PvpController.Say("[Erenshor PvP] UI could not initialize: " + ex.GetType().Name);
+                return false;
+            }
+        }
+
+        private static void BuildLauncher()
+        {
+            _launcherObject = CreatePanelObject("PvP Launcher", _root.transform, new Color32(23, 27, 34, 238));
+            _launcher = _launcherObject.GetComponent<RectTransform>();
+            _launcher.sizeDelta = new Vector2(LauncherWidth, LauncherHeight);
+            _launcher.anchorMin = _launcher.anchorMax = new Vector2(0f, 0f);
+            _launcher.pivot = new Vector2(0f, 0f);
+
+            RectTransform grip = CreateRect("Grip", _launcher, new Vector2(18f, LauncherHeight), new Vector2(0f, 0f));
+            Image gripImage = grip.gameObject.AddComponent<Image>();
+            gripImage.color = new Color32(61, 71, 84, 255);
+            PvpDragGuard drag = grip.gameObject.AddComponent<PvpDragGuard>();
+            drag.Target = _launcher;
+            drag.OnDragCompleted = PersistLauncherPosition;
+            AddText(grip, "⋮", 18, TextAlignmentOptions.Center, Color.white);
+
+            RectTransform buttonRect = CreateRect("Open", _launcher, new Vector2(LauncherWidth - 18f, LauncherHeight), new Vector2(18f, 0f));
+            Button button = AddButton(buttonRect, "PvP", delegate { PvpControlApi.TogglePanel(); });
+            _launcherText = button.GetComponentInChildren<TextMeshProUGUI>();
+        }
+
+        private static void BuildPanel()
+        {
+            _panelObject = CreatePanelObject("PvP Panel", _root.transform, new Color32(18, 22, 29, 246));
+            _panel = _panelObject.GetComponent<RectTransform>();
+            _panel.sizeDelta = new Vector2(PanelWidth, PanelHeight);
+            _panel.anchorMin = _panel.anchorMax = new Vector2(0f, 0f);
+            _panel.pivot = new Vector2(0f, 0f);
+
+            _header = CreateRect("Header", _panel, new Vector2(PanelWidth, HeaderHeight), new Vector2(0f, PanelHeight - HeaderHeight));
+            Image headerImage = _header.gameObject.AddComponent<Image>();
+            headerImage.color = new Color32(39, 47, 58, 255);
+            _headerGrip = CreateRect("Header Drag Surface", _header, new Vector2(PanelWidth - 46f, HeaderHeight), Vector2.zero);
+            Image headerGripRaycast = _headerGrip.gameObject.AddComponent<Image>();
+            headerGripRaycast.color = new Color(0f, 0f, 0f, 0f);
+            _titleText = AddText(_headerGrip, "ERENSHOR PvP", 17, TextAlignmentOptions.MidlineLeft, Color.white);
+            SetOffsets(_titleText.rectTransform, 10f, 0f, 0f, 0f);
+            PvpDragGuard panelDrag = _headerGrip.gameObject.AddComponent<PvpDragGuard>();
+            panelDrag.Target = _panel;
+            panelDrag.OnDragCompleted = PersistPanelPosition;
+
+            _closeRect = CreateRect("Close", _header, new Vector2(36f, HeaderHeight - 6f), new Vector2(PanelWidth - 40f, 3f));
+            AddButton(_closeRect, "X", delegate { PvpControlApi.ClosePanel(); });
+
+            _tabs = CreateRect("Tabs", _panel, new Vector2(PanelWidth - 16f, TabHeight), new Vector2(8f, PanelHeight - HeaderHeight - TabHeight - 4f));
+            BuildTabButton(_tabs, PvpPanelTab.Status, "STATUS", 0);
+            BuildTabButton(_tabs, PvpPanelTab.Fight, "FIGHT", 1);
+            BuildTabButton(_tabs, PvpPanelTab.Rules, "RULES", 2);
+            BuildTabButton(_tabs, PvpPanelTab.Score, "SCORE", 3);
+            BuildTabButton(_tabs, PvpPanelTab.Debug, "DEBUG", 4);
+
+            float viewportY = 48f;
+            float viewportH = PanelHeight - HeaderHeight - TabHeight - 58f;
+            _viewport = CreateRect("Viewport", _panel, new Vector2(PanelWidth - 16f, viewportH), new Vector2(8f, viewportY));
+            Image viewportImage = _viewport.gameObject.AddComponent<Image>();
+            viewportImage.color = new Color32(12, 15, 20, 150);
+            _viewport.gameObject.AddComponent<RectMask2D>();
+            ScrollRect scroll = _viewport.gameObject.AddComponent<ScrollRect>();
+            scroll.horizontal = false; scroll.vertical = true; scroll.scrollSensitivity = 22f;
+            _content = CreateRect("Content", _viewport, new Vector2(0f, 800f), Vector2.zero);
+            _content.anchorMin = new Vector2(0f, 1f); _content.anchorMax = new Vector2(1f, 1f); _content.pivot = new Vector2(0.5f, 1f);
+            _content.anchoredPosition = Vector2.zero; _content.sizeDelta = new Vector2(0f, 800f);
+            VerticalLayoutGroup layout = _content.gameObject.AddComponent<VerticalLayoutGroup>();
+            layout.padding = new RectOffset(8, 8, 8, 8); layout.spacing = 6f;
+            layout.childControlHeight = true; layout.childControlWidth = true; layout.childForceExpandHeight = false; layout.childForceExpandWidth = true;
+            ContentSizeFitter fitter = _content.gameObject.AddComponent<ContentSizeFitter>();
+            fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+            scroll.viewport = _viewport; scroll.content = _content;
+
+            BuildStatusPage(_content);
+            BuildFightPage(_content);
+            BuildRulesPage(_content);
+            BuildScorePage(_content);
+            BuildDebugPage(_content);
+
+            _footer = CreateRect("Footer", _panel, new Vector2(PanelWidth - 16f, 34f), new Vector2(8f, 8f));
+            _resultText = AddText(_footer, string.Empty, 12, TextAlignmentOptions.MidlineLeft, new Color32(180, 190, 204, 255));
+        }
+
+        private static void BuildStatusPage(RectTransform parent)
+        {
+            RectTransform page = CreatePage(parent, PvpPanelTab.Status);
+            AddSectionHeader(page, "STATUS / SAFETY");
+            _statusText = AddLayoutText(page, string.Empty, 14, 126f);
+            AddLayoutButton(page, "Toggle PvP Enabled", delegate { PvpControlApi.SetEnabled(!PvpController.Enabled); });
+            AddLayoutButton(page, "Toggle Arranged Challenges", delegate { PvpControlApi.SetArrangedEnabled(!PvpController.ArrangedEnabled); });
+            AddLayoutButton(page, "Toggle Wild Ambushes", delegate { PvpControlApi.SetAmbushEnabled(!PvpController.AmbushEnabled); });
+            _ambushHereButton = AddLayoutButton(page, "Allow ambushes here", delegate
+            {
+                string result = PvpControlApi.SetAmbushHere(!PvpController.AmbushZoneListedHere);
+                SetResult(result);
+            });
+            AddSectionHeader(page, "PENDING CHALLENGE");
+            _pendingText = AddLayoutText(page, "None pending.", 14, 88f);
+            RectTransform row = AddButtonRow(page);
+            _acceptButton = AddButton(CreateFillCell(row, 0, 2), "Accept", delegate { if (!PvpControlApi.AcceptPending()) SetResult("No pending challenge."); });
+            _refuseButton = AddButton(CreateFillCell(row, 1, 2), "Refuse", delegate { if (!PvpControlApi.RefusePending()) SetResult("No pending challenge."); });
+            AddLayoutButton(page, "Reset panel position", delegate { PvpControlApi.ResetPanelPosition(); });
+        }
+
+        private static void BuildFightPage(RectTransform parent)
+        {
+            RectTransform page = CreatePage(parent, PvpPanelTab.Fight);
+            AddSectionHeader(page, "CURRENT ENCOUNTER");
+            _fightText = AddLayoutText(page, string.Empty, 14, 240f);
+            _fleeButton = AddLayoutButton(page, "Flee this fight", delegate
+            {
+                if (!PvpTemporaryCloneFactory.HasActiveTeam) { SetResult("No active PvP encounter."); return; }
+                if (!_fleeConfirm || Time.unscaledTime > _fleeConfirmUntil)
+                {
+                    _fleeConfirm = true; _fleeConfirmUntil = Time.unscaledTime + 5f; SetResult("Press Confirm Flee within 5 seconds."); return;
+                }
+                _fleeConfirm = false; SetResult(PvpControlApi.FleeEncounter());
+            });
+            AddLayoutButton(page, "Verify runtime", delegate { SetResult(PvpController.VerifyText()); });
+        }
+
+        private static void BuildRulesPage(RectTransform parent)
+        {
+            RectTransform page = CreatePage(parent, PvpPanelTab.Rules);
+            AddSectionHeader(page, "MATCH RULES");
+            _rulesText = AddLayoutText(page, string.Empty, 14, 180f);
+            AddStepper(page, "Ambush chance", delegate { PvpControlApi.AdjustAmbushChance(-1); }, delegate { PvpControlApi.AdjustAmbushChance(1); });
+            AddStepper(page, "Minimum gap", delegate { PvpControlApi.AdjustAmbushMinimum(-1); }, delegate { PvpControlApi.AdjustAmbushMinimum(1); });
+            AddStepper(page, "Maximum gap", delegate { PvpControlApi.AdjustAmbushMaximum(-1); }, delegate { PvpControlApi.AdjustAmbushMaximum(1); });
+        }
+
+        private static void BuildScorePage(RectTransform parent)
+        {
+            RectTransform page = CreatePage(parent, PvpPanelTab.Score);
+            AddSectionHeader(page, "PVP RECORD");
+            _scoreText = AddLayoutText(page, string.Empty, 14, 230f);
+        }
+
+        private static void BuildDebugPage(RectTransform parent)
+        {
+            RectTransform page = CreatePage(parent, PvpPanelTab.Debug);
+            AddSectionHeader(page, "DIAGNOSTICS");
+            _debugText = AddLayoutText(page, "Developer controls remain available through /epvp debug commands. Production UI does not expose spawn/despawn probes.", 13, 120f);
+            AddLayoutButton(page, "Runtime verification", delegate { SetResult(PvpController.VerifyText()); });
+            AddLayoutButton(page, "Concise status", delegate { SetResult(PvpController.HubStatus()); });
+            AddLayoutButton(page, "Toggle validation logging", delegate { PvpControlApi.ToggleValidationLogging(); });
+            AddLayoutButton(page, "Hide debug tab", delegate { PvpControlApi.HideDebugTab(); });
+        }
+
+        private static void UpdateValues()
+        {
+            if (!_built) return;
+            if (_launcherText != null) _launcherText.text = PvpController.Enabled ? "PvP  ON" : "PvP  OFF";
+            if (_titleText != null) _titleText.text = "ERENSHOR PvP  •  " + PvpController.HubStatus();
+            if (_statusText != null)
+            {
+                _statusText.text =
+                    "PvP: " + OnOff(PvpController.Enabled) + "\n" +
+                    "Arranged challenges: " + OnOff(PvpController.ArrangedEnabled) + " (consensual)\n" +
+                    "Wild ambushes: " + OnOff(PvpController.AmbushEnabled) + "\n" +
+                    "Zone: " + PvpController.CurrentScene + "\n" +
+                    "Zone safety: " + (PvpController.IsProtectedHere ? "PROTECTED" : "PvP eligible") + "\n" +
+                    "Level range: +/-" + PvpController.LevelRangeHere;
+            }
+            if (_ambushHereButton != null) SetButtonText(_ambushHereButton, PvpController.AmbushZoneListedHere ? "Stop ambushes here" : "Allow ambushes here");
+            bool pending = PvpController.HasPending;
+            if (_pendingText != null)
+            {
+                if (!pending) _pendingText.text = "None pending.";
+                else
+                {
+                    PvpTeamPlan team = PvpController.PendingTeam;
+                    int count = team == null ? 1 : team.Members.Count;
+                    _pendingText.text = "Opponent: " + PvpController.PendingName + "\nParty size: " + count + "\nDecision expires: " + PvpController.PendingSecondsLeft + "s" +
+                        (team == null ? string.Empty : "\n" + team.DescribeCompact());
+                }
+            }
+            if (_acceptButton != null) _acceptButton.interactable = pending;
+            if (_refuseButton != null) _refuseButton.interactable = pending;
+
+            if (_fightText != null)
+            {
+                if (!PvpTemporaryCloneFactory.HasActiveTeam) _fightText.text = "No active PvP encounter.\nPlayer HP: " + PvpController.PlayerHealthText;
+                else
+                {
+                    List<PvpRosterEntry> roster = PvpTemporaryCloneFactory.Roster();
+                    System.Text.StringBuilder sb = new System.Text.StringBuilder();
+                    sb.Append("Mode: ").Append(PvpTemporaryCloneFactory.ActiveMode.ToString().ToLowerInvariant()).Append('\n');
+                    sb.Append("Player HP: ").Append(PvpController.PlayerHealthText).Append('\n');
+                    for (int i = 0; i < roster.Count; i++)
+                    {
+                        PvpRosterEntry r = roster[i];
+                        sb.Append(r.Name).Append(" L").Append(r.Level).Append(' ').Append(r.ClassName).Append(" — ").Append(r.HealthText).Append('\n');
+                    }
+                    _fightText.text = sb.ToString().TrimEnd();
+                }
+            }
+            if (_fleeButton != null)
+            {
+                _fleeButton.interactable = PvpTemporaryCloneFactory.HasActiveTeam;
+                SetButtonText(_fleeButton, _fleeConfirm && Time.unscaledTime <= _fleeConfirmUntil ? "Confirm Flee" : "Flee this fight");
+                if (_fleeConfirm && Time.unscaledTime > _fleeConfirmUntil) _fleeConfirm = false;
+            }
+            if (_rulesText != null)
+            {
+                _rulesText.text =
+                    "Your party: " + PvpController.DefenderCount + " (avg L" + PvpController.DefenderAverageLevel + ")\n" +
+                    "Attacker count rule: " + PvpController.PartySizeRuleText + "\n" +
+                    "Ambush chance: " + PvpController.AmbushChancePercent + "%\n" +
+                    "Ambush gap: " + PvpController.AmbushMinimumMinutes + "–" + PvpController.AmbushMaximumMinutes + "m\n" +
+                    "Next ambush: " + PvpController.NextAmbushText + "\n" +
+                    "Next arranged offer: " + PvpController.NextOfferText;
+            }
+            if (_scoreText != null)
+            {
+                _scoreText.text =
+                    "Arranged: " + PvpRecordService.ArrangedWins + "W / " + PvpRecordService.ArrangedLosses + "L\n" +
+                    "Ambush: " + PvpRecordService.AmbushWins + "W / " + PvpRecordService.AmbushLosses + "L\n" +
+                    "Escapes: " + PvpRecordService.Escapes + "\n" +
+                    "Last: " + Safe(PvpRecordService.LastOpponent) + " — " + Safe(PvpRecordService.LastResult) + "\n" +
+                    "Victory reward: " + (PvpRewardService.RewardsEnabled ? PvpRewardService.XpPercent + "% XP + gold" : "disabled") + "\n" +
+                    "Reward cooldown: " + (PvpRewardService.CooldownMinutesRemaining == 0 ? "ready" : PvpRewardService.CooldownMinutesRemaining + "m");
+            }
+            if (_debugText != null) _debugText.text = "Validation logging: " + OnOff(PvpController.ValidationLogging) + "\nDeveloper spawn/probe commands remain command-only to keep production UI control-safe.";
+            if (_debugTabButton != null) _debugTabButton.gameObject.SetActive(PvpController.ShowDebugTab);
+            if (!PvpController.ShowDebugTab && _tab == PvpPanelTab.Debug) SelectTab(PvpPanelTab.Status);
+        }
+
+        private static void ApplyTabVisibility()
+        {
+            foreach (KeyValuePair<PvpPanelTab, GameObject> kv in Pages) if (kv.Value != null) kv.Value.SetActive(kv.Key == _tab);
+            foreach (KeyValuePair<PvpPanelTab, Button> kv in TabButtons) if (kv.Value != null) kv.Value.interactable = kv.Key != _tab;
+        }
+
+        private static void HideAll()
+        {
+            if (_panelObject != null) _panelObject.SetActive(false);
+            if (_launcherObject != null) _launcherObject.SetActive(false);
+        }
+
+        private static void ClampAndApplyPositions(bool persist)
+        {
+            ApplyPanelPosition(persist);
+            ApplyLauncherPosition(persist);
+        }
+
+        private static void ApplyPanelPosition(bool persist)
+        {
+            if (_panel == null) return;
+            PvpUiRect r = PvpUiGeometry.ResolvePanel(_panelNormX, _panelNormY, Screen.width, Screen.height, PanelWidth, PanelHeight);
+            ResizePanel(r.Width, r.Height);
+            _panel.anchoredPosition = new Vector2(r.X, r.Y);
+            PvpUiGeometry.Normalize(r, Screen.width, Screen.height, out _panelNormX, out _panelNormY);
+            if (persist) PersistPanelPosition();
+        }
+
+        private static void ApplyLauncherPosition(bool persist)
+        {
+            if (_launcher == null) return;
+            PvpUiRect r = PvpUiGeometry.ResolveLauncher(_launcherNormX, _launcherNormY, Screen.width, Screen.height, LauncherWidth, LauncherHeight);
+            _launcher.anchoredPosition = new Vector2(r.X, r.Y);
+            PvpUiGeometry.Normalize(r, Screen.width, Screen.height, out _launcherNormX, out _launcherNormY);
+            if (persist) PersistLauncherPosition();
+        }
+
+
+        private static void ResizePanel(float width, float height)
+        {
+            if (_panel == null) return;
+            _panel.sizeDelta = new Vector2(width, height);
+            if (_header != null) { _header.sizeDelta = new Vector2(width, HeaderHeight); _header.anchoredPosition = new Vector2(0f, height - HeaderHeight); }
+            if (_headerGrip != null) _headerGrip.sizeDelta = new Vector2(Math.Max(80f, width - 46f), HeaderHeight);
+            if (_closeRect != null) _closeRect.anchoredPosition = new Vector2(Math.Max(4f, width - 40f), 3f);
+            if (_tabs != null) { _tabs.sizeDelta = new Vector2(Math.Max(80f, width - 16f), TabHeight); _tabs.anchoredPosition = new Vector2(8f, height - HeaderHeight - TabHeight - 4f); }
+            float tabWidth = Math.Max(16f, (width - 16f) / 5f);
+            foreach (KeyValuePair<PvpPanelTab, Button> kv in TabButtons)
+            {
+                if (kv.Value == null) continue;
+                int index = (int)kv.Key;
+                RectTransform rt = kv.Value.transform as RectTransform;
+                if (rt != null) { rt.sizeDelta = new Vector2(Math.Max(12f, tabWidth - 3f), TabHeight); rt.anchoredPosition = new Vector2(index * tabWidth, 0f); }
+            }
+            float viewportHeight = Math.Max(90f, height - HeaderHeight - TabHeight - 58f);
+            if (_viewport != null) { _viewport.sizeDelta = new Vector2(Math.Max(80f, width - 16f), viewportHeight); _viewport.anchoredPosition = new Vector2(8f, 48f); }
+            if (_content != null) _content.sizeDelta = new Vector2(0f, _content.sizeDelta.y);
+            if (_footer != null) { _footer.sizeDelta = new Vector2(Math.Max(80f, width - 16f), 34f); _footer.anchoredPosition = new Vector2(8f, 8f); }
+        }
+
+        private static void PersistPanelPosition()
+        {
+            if (_panel == null) return;
+            PvpUiRect r = new PvpUiRect(_panel.anchoredPosition.x, _panel.anchoredPosition.y, _panel.sizeDelta.x, _panel.sizeDelta.y);
+            r = PvpUiGeometry.Clamp(r, Screen.width, Screen.height);
+            _panel.anchoredPosition = new Vector2(r.X, r.Y);
+            PvpUiGeometry.Normalize(r, Screen.width, Screen.height, out _panelNormX, out _panelNormY);
+            if (_persistPanel != null) _persistPanel(_panelNormX, _panelNormY);
+        }
+
+        private static void PersistLauncherPosition()
+        {
+            if (_launcher == null) return;
+            PvpUiRect r = new PvpUiRect(_launcher.anchoredPosition.x, _launcher.anchoredPosition.y, LauncherWidth, LauncherHeight);
+            r = PvpUiGeometry.Clamp(r, Screen.width, Screen.height);
+            _launcher.anchoredPosition = new Vector2(r.X, r.Y);
+            PvpUiGeometry.Normalize(r, Screen.width, Screen.height, out _launcherNormX, out _launcherNormY);
+            if (_persistLauncher != null) _persistLauncher(_launcherNormX, _launcherNormY);
+        }
+
+        private static GameObject CreatePanelObject(string name, Transform parent, Color color)
+        {
+            GameObject go = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(Image), typeof(CanvasGroup));
+            go.transform.SetParent(parent, false);
+            Image image = go.GetComponent<Image>(); image.color = color;
+            CanvasGroup group = go.GetComponent<CanvasGroup>(); group.interactable = true; group.blocksRaycasts = true;
+            return go;
+        }
+
+        private static RectTransform CreateRect(string name, Transform parent, Vector2 size, Vector2 pos)
+        {
+            GameObject go = new GameObject(name, typeof(RectTransform));
+            RectTransform rt = go.GetComponent<RectTransform>(); rt.SetParent(parent, false);
+            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0f, 0f); rt.sizeDelta = size; rt.anchoredPosition = pos;
+            return rt;
+        }
+
+        private static RectTransform CreatePage(RectTransform parent, PvpPanelTab tab)
+        {
+            GameObject go = new GameObject(tab + " Page", typeof(RectTransform), typeof(VerticalLayoutGroup), typeof(ContentSizeFitter));
+            RectTransform rt = go.GetComponent<RectTransform>(); rt.SetParent(parent, false);
+            rt.anchorMin = new Vector2(0f, 1f); rt.anchorMax = new Vector2(1f, 1f); rt.pivot = new Vector2(0.5f, 1f); rt.sizeDelta = Vector2.zero;
+            VerticalLayoutGroup layout = go.GetComponent<VerticalLayoutGroup>(); layout.spacing = 6f; layout.childControlHeight = true; layout.childControlWidth = true; layout.childForceExpandHeight = false;
+            ContentSizeFitter fitter = go.GetComponent<ContentSizeFitter>(); fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+            LayoutElement le = go.AddComponent<LayoutElement>(); le.minHeight = 1f;
+            Pages[tab] = go;
+            return rt;
+        }
+
+        private static void BuildTabButton(RectTransform parent, PvpPanelTab tab, string label, int index)
+        {
+            float width = (PanelWidth - 16f) / 5f;
+            RectTransform rt = CreateRect(tab + " Tab", parent, new Vector2(width - 3f, TabHeight), new Vector2(index * width, 0f));
+            Button b = AddButton(rt, label, delegate { SelectTab(tab); });
+            TabButtons[tab] = b;
+            if (tab == PvpPanelTab.Debug) _debugTabButton = b;
+        }
+
+        private static void AddSectionHeader(RectTransform parent, string text)
+        {
+            TextMeshProUGUI t = AddLayoutText(parent, text, 13, 26f);
+            t.color = new Color32(132, 176, 220, 255);
+            t.fontStyle = FontStyles.Bold;
+        }
+
+        private static TextMeshProUGUI AddLayoutText(RectTransform parent, string text, int size, float preferredHeight)
+        {
+            GameObject go = new GameObject("Text", typeof(RectTransform), typeof(TextMeshProUGUI), typeof(LayoutElement));
+            RectTransform rt = go.GetComponent<RectTransform>(); rt.SetParent(parent, false);
+            TextMeshProUGUI tmp = go.GetComponent<TextMeshProUGUI>(); tmp.text = text; tmp.fontSize = size; tmp.color = new Color32(222, 226, 232, 255); tmp.alignment = TextAlignmentOptions.TopLeft; tmp.enableWordWrapping = true; tmp.raycastTarget = false;
+            LayoutElement le = go.GetComponent<LayoutElement>(); le.preferredHeight = preferredHeight;
+            return tmp;
+        }
+
+        private static Button AddLayoutButton(RectTransform parent, string label, UnityEngine.Events.UnityAction callback)
+        {
+            GameObject go = new GameObject(label, typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
+            RectTransform rt = go.GetComponent<RectTransform>(); rt.SetParent(parent, false);
+            LayoutElement le = go.GetComponent<LayoutElement>(); le.preferredHeight = 32f;
+            Button b = go.GetComponent<Button>(); b.targetGraphic = go.GetComponent<Image>(); b.targetGraphic.color = new Color32(53, 66, 82, 255); b.onClick.AddListener(callback);
+            AddText(rt, label, 13, TextAlignmentOptions.Center, Color.white);
+            return b;
+        }
+
+        private static RectTransform AddButtonRow(RectTransform parent)
+        {
+            GameObject go = new GameObject("Button Row", typeof(RectTransform), typeof(LayoutElement));
+            RectTransform rt = go.GetComponent<RectTransform>(); rt.SetParent(parent, false);
+            LayoutElement le = go.GetComponent<LayoutElement>(); le.preferredHeight = 34f;
+            return rt;
+        }
+
+        private static RectTransform CreateFillCell(RectTransform parent, int index, int count)
+        {
+            GameObject go = new GameObject("Cell", typeof(RectTransform));
+            RectTransform rt = go.GetComponent<RectTransform>(); rt.SetParent(parent, false);
+            rt.anchorMin = new Vector2((float)index / count, 0f); rt.anchorMax = new Vector2((float)(index + 1) / count, 1f); rt.offsetMin = new Vector2(index == 0 ? 0f : 3f, 0f); rt.offsetMax = new Vector2(index == count - 1 ? 0f : -3f, 0f);
+            return rt;
+        }
+
+        private static void AddStepper(RectTransform parent, string label, UnityEngine.Events.UnityAction minus, UnityEngine.Events.UnityAction plus)
+        {
+            RectTransform row = AddButtonRow(parent);
+            RectTransform labelRt = CreateFillCell(row, 0, 2);
+            AddText(labelRt, label, 13, TextAlignmentOptions.MidlineLeft, new Color32(210, 216, 224, 255));
+            RectTransform controls = CreateFillCell(row, 1, 2);
+            AddButton(CreateFillCell(controls, 0, 2), "−", minus);
+            AddButton(CreateFillCell(controls, 1, 2), "+", plus);
+        }
+
+        private static Button AddButton(RectTransform rt, string label, UnityEngine.Events.UnityAction callback)
+        {
+            Image image = rt.gameObject.GetComponent<Image>(); if (image == null) image = rt.gameObject.AddComponent<Image>(); image.color = new Color32(53, 66, 82, 255);
+            Button b = rt.gameObject.GetComponent<Button>(); if (b == null) b = rt.gameObject.AddComponent<Button>(); b.targetGraphic = image; b.onClick.AddListener(callback);
+            AddText(rt, label, 13, TextAlignmentOptions.Center, Color.white);
+            return b;
+        }
+
+        private static TextMeshProUGUI AddText(RectTransform parent, string text, int size, TextAlignmentOptions alignment, Color color)
+        {
+            GameObject go = new GameObject("Label", typeof(RectTransform), typeof(TextMeshProUGUI));
+            RectTransform rt = go.GetComponent<RectTransform>(); rt.SetParent(parent, false); rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one; rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero;
+            TextMeshProUGUI tmp = go.GetComponent<TextMeshProUGUI>(); tmp.text = text; tmp.fontSize = size; tmp.alignment = alignment; tmp.color = color; tmp.raycastTarget = false; tmp.enableWordWrapping = true;
+            return tmp;
+        }
+
+        private static void SetOffsets(RectTransform rt, float left, float bottom, float right, float top)
+        {
+            rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one; rt.offsetMin = new Vector2(left, bottom); rt.offsetMax = new Vector2(right, top);
+        }
+
+        private static void SetButtonText(Button button, string text)
+        {
+            if (button == null) return;
+            TextMeshProUGUI label = button.GetComponentInChildren<TextMeshProUGUI>(); if (label != null) label.text = text;
+        }
+
+        private static void SetResult(string value)
+        {
+            if (_resultText != null) _resultText.text = string.IsNullOrWhiteSpace(value) ? string.Empty : value;
+        }
+
+        private static string OnOff(bool value) { return value ? "ON" : "OFF"; }
+        private static string Safe(string value) { return string.IsNullOrWhiteSpace(value) ? "none" : value; }
     }
 }

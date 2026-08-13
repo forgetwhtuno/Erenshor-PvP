@@ -64,25 +64,40 @@ namespace ErenshorPvP
         [Config("HighRiskLevelRange", "PvP", "High-risk-zone level range, clamped to 1-10.")]
         public int HighRiskLevelRange = 5;
 
-        [Config("PanelOffsetX", "UI", "Persisted horizontal offset from the default upper-right panel position, matching the Party Tools convention. Updated when the panel finishes moving.")]
+        [Config("PanelOffsetX", "UI.Legacy", "Legacy IMGUI pixel offset. Retained for config compatibility but ignored by the retained-uGUI panel.")]
         public float PanelOffsetX = 0f;
 
-        [Config("PanelOffsetY", "UI", "Persisted vertical offset from the default position below the upper-right minimap area. Updated when the panel finishes moving.")]
+        [Config("PanelOffsetY", "UI.Legacy", "Legacy IMGUI pixel offset. Retained for config compatibility but ignored by the retained-uGUI panel.")]
         public float PanelOffsetY = 0f;
 
-        [Config("ShowTestTab", "UI", "Show the hidden TEST tab with force/verify/diagnose controls. Toggle in game with /epvp debug.")]
+        [Config("PanelNormalizedX", "UI", "Retained-uGUI panel horizontal position normalized 0..1 from the bottom-left. -1 uses the safe default.")]
+        public float PanelNormalizedX = -1f;
+
+        [Config("PanelNormalizedY", "UI", "Retained-uGUI panel vertical position normalized 0..1 from the bottom-left. -1 uses the safe default.")]
+        public float PanelNormalizedY = -1f;
+
+        [Config("ShowTestTab", "UI", "Show the retained DEBUG tab with runtime verification, concise status, and validation-logging controls. Toggle in game with /epvp debug.")]
         public bool ShowTestTab = false;
 
-        [Config("ShowQuickToggle", "UI", "Show the compact draggable PvP launcher beside the minimap. Click opens/closes the full panel; the label shows the current master on/off state.")]
+        [Config("ShowQuickToggle", "UI", "Show the compact PvP launcher when Suite Hub is usable. If Hub is absent or this module bridge is unavailable, the launcher is forced visible so the UI cannot be locked out.")]
         public bool ShowQuickToggle = true;
 
-        [Config("LauncherX", "UI", "Persisted horizontal position of the compact PvP launcher. -1 uses the default upper-right position.")]
+        [Config("ShowStandaloneLauncherWithHub", "UI.Legacy", "Deprecated compatibility setting. ShowQuickToggle now owns launcher preference when Hub is usable; fallback visibility is always forced when Hub is unavailable.")]
+        public bool ShowStandaloneLauncherWithHub = false;
+
+        [Config("LauncherX", "UI.Legacy", "Legacy IMGUI launcher position. Retained for config compatibility but ignored by retained uGUI.")]
         public float LauncherX = -1f;
 
-        [Config("LauncherY", "UI", "Persisted vertical position of the compact PvP launcher. -1 uses the default upper-right position.")]
+        [Config("LauncherY", "UI.Legacy", "Legacy IMGUI launcher position. Retained for config compatibility but ignored by retained uGUI.")]
         public float LauncherY = -1f;
 
-        [Config("FullView", "UI", "Open the panel with the tab bar and all detail views. When false the panel stays compact and shows only the master switch, zone safety, and anything awaiting a decision. Toggled by the panel's Full checkbox.")]
+        [Config("LauncherNormalizedX", "UI", "Retained-uGUI launcher horizontal position normalized 0..1 from the bottom-left. -1 uses the safe default.")]
+        public float LauncherNormalizedX = -1f;
+
+        [Config("LauncherNormalizedY", "UI", "Retained-uGUI launcher vertical position normalized 0..1 from the bottom-left. -1 uses the safe default.")]
+        public float LauncherNormalizedY = -1f;
+
+        [Config("FullView", "UI.Legacy", "Deprecated compatibility value from the old IMGUI compact/full panel. Retained uGUI always uses the dedicated tabbed panel.")]
         public bool FullView = false;
 
         [Config("ValidationLogging", "Debug", "Temporary detailed PvP acceptance logging. Turn off after validation with /epvp validation off; core failures and final results remain logged.")]

@@ -2,22 +2,24 @@
 
 Standalone MMO-style PvP encounters for Erenshor. Practice Duels remains friendly, consensual, and non-lethal for Sims already in the zone. Erenshor PvP selects off-map Sim profiles and runs lethal encounters with normal player death and respawn. World PvP contains both consensual arranged matches and rare non-consensual wild ambushes.
 
-Current development line: 0.5.0. Remaining work is tracked in [docs/PVP_TODO.md](docs/PVP_TODO.md); the most important remaining gate is live in-game validation of native combat, visuals, rewards, and the Party Tools-style panel.
+Current development line: 0.5.0. Remaining work is tracked in [docs/PVP_TODO.md](docs/PVP_TODO.md); the most important remaining gate is live in-game validation of native combat, visuals, rewards, and the retained-uGUI panel.
 
 ## Status: native Lunaris migration candidate
 
-This version has been migrated off BepInEx 5 onto native Lunaris. This is a
-loader/config/logging/lifecycle migration only — no eligibility, matchmaking, spawn,
-combat-containment, reward-calculation, or event-contract logic changed; every Harmony patch
-target has been re-verified against the currently installed `Assembly-CSharp.dll`. **Live
-in-game verification under Lunaris, including `/epvp selftest`, has not yet been done.** A legacy
-BepInEx release remains available in this repository's Git history for anyone still on BepInEx.
+This development line is native Lunaris. The earlier loader/config/logging/lifecycle migration
+was compile-verified against the then-current installed assemblies without changing eligibility,
+matchmaking, spawning, combat containment, rewards, or event contracts. The current workstream
+additionally replaces the player-facing IMGUI surface with retained uGUI while leaving those
+existing gameplay services authoritative. **This retained-uGUI delta still requires a fresh build
+against the current installed `Assembly-CSharp.dll`/Lunaris/Unity assemblies and live in-game
+verification, including `/epvp selftest`, before release.** A legacy BepInEx release remains
+available in this repository's Git history for anyone still on BepInEx.
 
 ## Features
 
-- Disabled by default. Turning world PvP on opts the character into both arranged offers and the possibility of rare ambushes in configured wild zones. Use the compact `PvP ON/OFF` switch near the map, `/epvp on`, or `/epvp off`. F10 opens the full panel.
-- The panel follows the Party Tools convention: the same palette, header drag, default position in the upper right below the minimap, and offset-based saved position, so it sits alongside Party Tools without overlapping the character or party panels. While the pointer is over the panel or the map-side toggle it behaves like a menu, not the world: a `PlayerControl.LeftClick` prefix suppresses world clicks so the current target is never dropped, and the `csMouseOrbit` orbit speeds are held at zero for that frame so moving or dragging the panel cannot turn the camera. The camera still follows the player normally throughout.
-- Panel tabs: **PVP** (master `World PvP` switch, separate `Arranged challenges` and `Wild ambushes` switches, zone status, an `Allow/Stop ambushes here` button, and the pending challenge card with Accept/Refuse), **FIGHT** (live attacker roster with level, class, role, guild, health, and spell count plus the encounter mode and motive), **RULES** (level range, party-size rules, ambush chance and interval steppers, next ambush/offer timers), and **SCORE** (separate arranged and ambush records, reward values, anti-farm cooldown, and cosmetic-slot status). `/epvp debug` reveals a hidden **TEST** tab with force/verify/diagnose controls.
+- Disabled by default. Turning world PvP on opts the character into both arranged offers and the possibility of rare ambushes in configured wild zones. Normal mouse access is through the retained-uGUI **PvP** launcher or Suite Hub's **Open PvP** action; `/epvp` remains a compatibility/debug command surface.
+- The dedicated panel is retained Unity uGUI (`Canvas`/`GraphicRaycaster`/TMP/Buttons/ScrollRect). Its launcher and header have separate EventSystem drag grips, buttons are never drag surfaces, and owned drags set `GameData.DraggingUIElement` until every end/cancel/unload path releases it. No `OnGUI`, `GUI.Window`, world-click Harmony suppression, camera Harmony muting, or `EditUIMode` forcing is used by production UI.
+- Panel tabs: **STATUS** (master PvP/arranged/ambush switches, zone safety, ambush-zone control, pending Accept/Refuse), **FIGHT** (live encounter roster plus two-step Flee confirmation), **RULES** (party-size/level context and safe ambush cadence steppers), **SCORE** (record/reward state), and optional **DEBUG** (bounded runtime verification only; spawn/despawn probes remain command-only).
 - Local Sims are never turned hostile. Only profiles outside the current zone can lead or join an attacking party; native `CurScene` tracking keeps a briefly pooled/inactive same-zone Sim from being misclassified as off-map.
 - Arranged party/guild offers identify the leader, composition, and motive and require Accept or Refuse.
 - Wild ambushes do not ask for match consent after world PvP has been enabled. They start automatically, only in the exact `Ambush/Zones` allowlist, never in protected areas or during existing combat. Natural opportunities use a randomized 15-35 minute interval and a 50% roll by default, so ambushes remain uncommon.
@@ -42,21 +44,19 @@ BepInEx release remains available in this repository's Git history for anyone st
 
 ## Current UI
 
-The Party Tools-style UI is now implemented in the PvP plugin as a coordinated standalone window rather than a hard dependency on Party Tools.
+PvP owns one persistent retained-uGUI canvas containing a small launcher and a dedicated tabbed panel. The visible launcher is the normal standalone entry point. With Suite Hub usable and this module's Aura bridge registered, the launcher obeys the `Show PvP launcher` preference; if Hub is absent or the bridge is unavailable, the launcher is forced visible so the player cannot lock themselves out.
 
-The panel opens **compact**: the master World PvP switch, the current zone's safety status, and anything actually waiting on you — a pending challenge card with Accept/Refuse, or a live fight roster with a Flee button. Nothing else is shown. Ticking **Full** in the header reveals the tab bar and the detail views below; the choice is remembered. Long content scrolls and section headings collapse, so no tab can push the window off the screen.
+The panel has a visible **X**, a dedicated header drag surface that never overlaps the X or tab buttons, normalized bottom-left position persistence, resolution-change reclamping, and a visible reset-position action. Long content stays inside the scroll viewport. The UI object tree is built once and dynamic values are updated in place; tab switches only activate/deactivate the already-built page roots.
 
-Full view contains:
+Tabs:
 
-- **PVP**: master World PvP switch, Arranged Challenges switch, Wild Ambushes switch, zone safety status, ambush-zone control, and Accept/Refuse challenge card.
-- **FIGHT**: active mode, motive, attacker roster, level, class, role, guild, health, and spell counts, plus Verify, Diagnose, Team, and Despawn controls.
-- **RULES**: level range, party-size rules, ambush cadence/chance, next-event timers, ambush-zone controls, and a defenders-vs-attackers match simulator.
-- **SCORE**: arranged and ambush records, rewards, anti-farm cooldown, and cosmetic status.
-- **TEST**: hidden with `/epvp debug`. Groups every remaining command under Encounter, Inspect, Isolated Clone Tests, and Panel headings.
+- **STATUS** — concise current state, PvP enable/disable, arranged challenge toggle, wild ambush toggle, current-zone safety/ambush permission, and pending challenge Accept/Refuse.
+- **FIGHT** — current proxy roster and HP, plus **Flee this fight** with an explicit second click required within five seconds.
+- **RULES** — party-size/level context, configured ambush chance and interval, and bounded cadence controls routed through `PvpControlApi`.
+- **SCORE** — arranged/ambush record, escapes, last result, reward state, and anti-farm cooldown.
+- **DEBUG** — only when `/epvp debug` enables it. It contains bounded verification/status controls. Spawn/target/fight clone probes remain command-only development tools and are not production panel buttons.
 
-Every `/epvp` subcommand has a panel control, so the chat syntax is never required. Command output is written to the social log as usual and mirrored inside the panel for 30 seconds, so results stay readable while the panel covers the chat area.
-
-The panel position is persisted using the same offset-based approach as Party Tools. `/epvp panelreset` restores the default position.
+All panel mutations route through `PvpControlApi` and then the existing controller/services. The UI does not directly own matchmaking, proxy spawning, combat, damage, rewards, persistence, or encounter outcomes. A legacy F10 toggle remains in the controller for compatibility with existing users, but it is not the normal or documented access requirement.
 
 ## Commands
 
@@ -77,7 +77,7 @@ The panel position is persisted using the same offset-based approach as Party To
 /epvp ambushhere on|off  add/remove the current scene (protected scenes cannot be added)
 /epvp despawn         safely remove a test/active proxy team
 /epvp flee            leave an active lethal PvP encounter; records an escape and grants no reward
-/epvp debug           show or hide the panel's TEST tab
+/epvp debug           show or hide the panel's DEBUG tab
 /epvp validation on|off  detailed acceptance logs; disable after validation
 /epvp panelreset      move the panel back to its default position
 /epvp selftest        deterministic policy tests
@@ -90,37 +90,13 @@ The panel position is persisted using the same offset-based approach as Party To
 
 `/epvp` is intentional because Erenshor reserves `/p` for party chat.
 
-### Where each command lives in the panel
+### Panel coverage
 
-Every command has a control. Controls needed for ordinary play are reachable without the hidden TEST tab; only development and isolated-proxy tooling is behind it.
+Ordinary player-facing actions are available without chat: enable/disable, arranged/wild switches, current zone state, pending Accept/Refuse, active-fight Flee, cadence controls, records/rewards, and position reset. Detailed spawn/probe/test commands remain deliberately command-only so migration of the presentation layer cannot accidentally broaden combat controls.
 
-| Command | Panel control |
-|---|---|
-| `/epvp` | F10 opens the panel. The compact body *is* the status view; PVP > PANEL > **Status** prints the status line |
-| `/epvp on` / `off` | **World PvP** switch (compact body and PVP tab), or the map-side `PvP ON/OFF` toggle |
-| `/epvp arranged on` / `off` | **Arranged challenges** sub-switch on the PVP tab |
-| `/epvp ambush on` / `off` | **Wild ambushes** sub-switch on the PVP tab |
-| `/epvp accept` / `refuse` / `decline` | **Accept** / **Refuse** on the challenge card (compact body, PVP tab, TEST) |
-| `/epvp flee` / `escape` | **Flee this fight** on the active encounter block (compact body, PVP tab, FIGHT tab) |
-| `/epvp force [arranged\|challenge\|ambush] [1-5]` | TEST > ENCOUNTER: attacker stepper plus **Force arranged** / **Force ambush** |
-| `/epvp team` | FIGHT > **Team**, with and without an active encounter |
-| `/epvp clonestatus` | FIGHT > **Clone status** |
-| `/epvp verify` | FIGHT > **Verify** |
-| `/epvp diagnose` | FIGHT > **Diagnose** |
-| `/epvp ambushzones` | RULES > AMBUSH CADENCE > **List zones** |
-| `/epvp ambushhere on` / `off` | **Allow/Stop ambushes here** on the PVP tab, or RULES > AMBUSH CADENCE > **Allow/Stop here** |
-| `/epvp plan <defenders> <attackers>` | RULES > MATCH SIMULATOR: party-size steppers plus **Simulate match** |
-| `/epvp panelreset` | PVP > PANEL > **Reset position** |
-| `/epvp despawn` | FIGHT > **Despawn team (cleanup)** |
-| `/epvp selftest` | TEST > INSPECT > **Self test** |
-| `/epvp validation on` / `off` | TEST > INSPECT > **Detailed validation logging** |
-| `/epvp spawnprobe` | TEST > INSPECT > **Spawn probe** |
-| `/epvp spawnclone` / `targetclone` / `fightclone` | TEST > ISOLATED CLONE TESTS |
-| `/epvp debug` | Chat only, by design: it reveals the hidden tab. TEST > PANEL > **Hide test tab** turns it back off |
+`/epvp` remains intentional because Erenshor reserves `/p` for party chat. `/epvp panelreset` remains a recovery command in addition to the visible reset control. `/epvp debug` only controls visibility of the bounded DEBUG tab.
 
-Only arranged challenges ever ask permission. The PVP tab states this at each switch, and `/epvp arranged` and `/epvp ambush` repeat it in their replies, so enabling ambushes cannot be mistaken for opting into a prompt.
-
-The optional `[defenderLevel] [attackerLevel]` arguments of `/epvp plan` are chat-only. The simulator uses the policy defaults, which is what the everyday party-size check needs.
+Only arranged challenges ever ask permission. Wild ambushes remain governed by the existing world-PvP opt-in, allowlists, cooldowns, and combat eligibility rules; this UI pass does not change those semantics.
 
 ## Test arranged and ambush encounters
 
@@ -163,3 +139,14 @@ Native spawn research is documented in [docs/NATIVE_SPAWN_FINDINGS.md](docs/NATI
 This project has been developed heavily with AI-assisted coding tools. The goal has been to build features I wanted to use in Erenshor, with development guided through design, testing, playtesting, audits, and iteration against the game. Bug reports, code review, corrections, and contributions from experienced Erenshor modders are welcome.
 
 This is an unofficial, community-made mod for Erenshor and is not affiliated with or endorsed by the game's developer.
+
+
+## Optional Suite Hub integration
+
+Erenshor Suite Hub is **optional**. This mod exposes a versioned, primitive-only `PvpControlApi`/Aura surface and never references the Hub assembly. Hub can display the deliberately concise status (`Enabled | Idle` / `Enabled | Match active`), change the established safe basic toggles (`PvP Enabled`, `Show PvP launcher`, arranged challenges, wild ambushes), and invoke the conventional `openPanel`/close/reset actions.
+
+The dedicated retained-uGUI panel remains fully usable without Hub. Launcher fallback is fail-open for access: when Hub is absent/unusable or this module's own Aura registration failed, the launcher is forced visible regardless of the saved preference. When Hub and the bridge are both usable, the preference is obeyed.
+
+Combat, matchmaking, proxy spawning, damage, death/respawn, rewards, ambush scheduling, eligibility, and encounter outcomes remain authoritative in existing PvP services and were not redesigned by this UI workstream.
+
+The retained-uGUI migration still requires a current-assembly compile and live Lunaris test before release.

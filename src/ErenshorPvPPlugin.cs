@@ -13,6 +13,7 @@ namespace ErenshorPvP
     {
         private Harmony _harmony;
         private PvpSettings _settings;
+        private PvpSuiteAuraProvider _auraProvider;
 
         private void Awake()
         {
@@ -25,14 +26,40 @@ namespace ErenshorPvP
             _harmony.PatchAll();
             SceneManager.sceneLoaded += OnSceneLoaded;
             SceneManager.sceneUnloaded += OnSceneUnloaded;
-            Logging.LogInfo("Erenshor PvP 0.5.0 loaded. Disabled by default; use /epvp or F10 for world PvP.");
+
+            // Optional Suite Hub transport adapter. Never assumed present; registration failure
+            // must never block normal standalone PvP.
+            try
+            {
+                _auraProvider = new PvpSuiteAuraProvider();
+                _auraProvider.Register(this);
+                PvpController.SuiteBridgeRegistered = _auraProvider.Registered;
+            }
+            catch (Exception ex) { Logging.LogError("PvP Suite Aura provider setup failed: " + ex); }
+
+            Logging.LogInfo("Erenshor PvP 0.5.0 loaded. Disabled by default; use the retained PvP panel (or /epvp compatibility commands) to opt in.");
         }
 
-        private void Update() { try { PvpController.Tick(); } catch (Exception ex) { Logging.LogError("PvP update failed: " + ex); } }
-        private void OnGUI() { try { PvpController.Draw(); } catch (Exception ex) { Logging.LogError("PvP UI failed: " + ex); } }
+        private void Update()
+        {
+            try { PvpController.Tick(); PvpController.RefreshUi(); }
+            catch (Exception ex) { Logging.LogError("PvP update/UI refresh failed: " + ex); PvpPanel.ReleaseDrag(); }
+        }
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode) { PvpController.SceneTransition(); }
         private void OnSceneUnloaded(Scene scene) { PvpController.SceneTransition(); }
-        private void OnDestroy() { PvpController.Shutdown(); PvpController.SaveSettings = null; ErenshorPvPPluginHolder.Instance = null; try { SceneManager.sceneLoaded -= OnSceneLoaded; SceneManager.sceneUnloaded -= OnSceneUnloaded; } catch { } try { if (_harmony != null) _harmony.UnpatchSelf(); } catch { } }
+        private void OnDestroy()
+        {
+            // Stop external control first, then tear down retained UI/gameplay-owned temporary state.
+            try { if (_auraProvider != null) _auraProvider.Unregister(); } catch { }
+            _auraProvider = null;
+            PvpController.SuiteBridgeRegistered = false;
+            PvpController.Shutdown();
+            PvpController.SaveSettings = null;
+            ErenshorPvPPluginHolder.Instance = null;
+            try { SceneManager.sceneLoaded -= OnSceneLoaded; SceneManager.sceneUnloaded -= OnSceneUnloaded; } catch { }
+            try { if (_harmony != null) _harmony.UnpatchSelf(); } catch { }
+            _harmony = null;
+        }
 
         internal bool Handle(TypeText typeText, string raw)
         {
@@ -54,62 +81,6 @@ namespace ErenshorPvP
             try { return ErenshorPvPPluginHolder.Instance == null || !ErenshorPvPPluginHolder.Instance.Handle(__instance, __instance == null || __instance.typed == null ? string.Empty : __instance.typed.text); }
             catch { return true; }
         }
-    }
-
-    // IMGUI cannot swallow this on its own: Erenshor reads the raw mouse here rather than
-    // through Event.current, so a click on the PvP panel would otherwise also move the
-    // camera or drop the current target.
-    [HarmonyPatch(typeof(PlayerControl), "LeftClick")]
-    internal static class PvpPanelLeftClickPatch
-    {
-        [HarmonyPrefix]
-        private static bool Prefix()
-        {
-            try { return !PvpController.PointerIsOverUi(); }
-            catch { return true; }
-        }
-    }
-
-    // csMouseOrbit.LateUpdate reads Input.GetAxis("Mouse X"/"Mouse Y") every frame with no
-    // mouse-button gate, so any pointer movement turns the camera - including dragging a
-    // panel. Skipping LateUpdate outright would also stop the camera following the player,
-    // so instead the orbit speeds are zeroed for the duration of the call: the follow and
-    // distance logic still runs, but the axis deltas contribute nothing.
-    [HarmonyPatch(typeof(csMouseOrbit), "LateUpdate")]
-    internal static class PvpCameraLookPatch
-    {
-        private static csMouseOrbit _muted;
-        private static float _mutedX;
-        private static float _mutedY;
-
-        // Always restores before muting again, so a throw inside LateUpdate cannot strand
-        // the camera at zero sensitivity.
-        internal static void Restore()
-        {
-            csMouseOrbit orbit = _muted;
-            _muted = null;
-            if (orbit == null) return;
-            try { orbit.xSpeed = _mutedX; orbit.ySpeed = _mutedY; } catch { }
-        }
-
-        [HarmonyPrefix]
-        private static void Prefix(csMouseOrbit __instance)
-        {
-            Restore();
-            try
-            {
-                if (__instance == null || !PvpController.PointerIsOverUi()) return;
-                _mutedX = __instance.xSpeed;
-                _mutedY = __instance.ySpeed;
-                __instance.xSpeed = 0f;
-                __instance.ySpeed = 0f;
-                _muted = __instance;
-            }
-            catch { }
-        }
-
-        [HarmonyPostfix]
-        private static void Postfix() { Restore(); }
     }
 
     // Harmony patch access is kept separate from the plugin instance so the prefix remains tiny.
