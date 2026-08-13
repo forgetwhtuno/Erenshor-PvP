@@ -24,6 +24,7 @@ namespace ErenshorPvP
         private GUIStyle _windowStyle;
         private GUIStyle _buttonStyle;
         private GUIStyle _openButtonStyle;
+        private GUIStyle _gripStyle;
 
         internal bool RequestToggle
         {
@@ -58,18 +59,25 @@ namespace ErenshorPvP
             _windowStyle = null;
             _buttonStyle = null;
             _openButtonStyle = null;
+            _gripStyle = null;
         }
 
+        // A narrow grip owns dragging, matching Journal's launcher. The action button no longer
+        // sits under GUI.DragWindow's rect -- overlapping the two meant a click could be consumed
+        // as a drag-start instead of a button press, live-confirmed as unreliable open/close and
+        // unreliable dragging on this launcher (Journal, whose drag rect never overlaps its button,
+        // did not have this problem).
         private void DrawContents(int id)
         {
+            GUI.Label(new Rect(3f, 5f, 14f, Height - 10f), "||", _gripStyle);
             string label = "PVP " + (_enabled ? "ON" : "OFF");
             GUIStyle style = _open ? _openButtonStyle : _buttonStyle;
             Color previous = GUI.color;
             GUI.color = _enabled ? new Color(0.65f, 1f, 0.75f, 1f) : new Color(0.85f, 0.85f, 0.85f, 1f);
-            if (GUI.Button(new Rect(5f, 5f, Width - 10f, Height - 10f), label, style))
+            if (GUI.Button(new Rect(18f, 4f, Width - 22f, Height - 8f), label, style))
                 _requestToggle = true;
             GUI.color = previous;
-            GUI.DragWindow(new Rect(0f, 0f, Width, Height));
+            GUI.DragWindow(new Rect(0f, 0f, 18f, Height));
         }
 
         private void EnsureStyles()
@@ -90,6 +98,12 @@ namespace ErenshorPvP
             _buttonStyle = Button(_buttonTexture, _buttonHoverTexture);
             _openButtonStyle = Button(_buttonOpenTexture, _buttonHoverTexture);
             _openButtonStyle.fontStyle = FontStyle.Bold;
+
+            _gripStyle = new GUIStyle(GUI.skin.label);
+            _gripStyle.fontSize = 10;
+            _gripStyle.fontStyle = FontStyle.Bold;
+            _gripStyle.alignment = TextAnchor.MiddleCenter;
+            _gripStyle.normal.textColor = new Color(0.56f, 0.88f, 1f, 0.95f);
         }
 
         private static GUIStyle Button(Texture2D normal, Texture2D hover)

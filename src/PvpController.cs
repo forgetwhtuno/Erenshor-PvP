@@ -37,6 +37,7 @@ namespace ErenshorPvP
         private static PvpLauncher _launcher;
         private static Rect _launcherRect;
         private static bool _launcherRectInitialized;
+        private static bool _pendingLauncherToggle;
         private static float _nextScan;
         private static float _nextOffer;
         private static float _nextAmbush;
@@ -101,6 +102,14 @@ namespace ErenshorPvP
                 return;
             }
             if (Input.GetKeyDown(KeyCode.F10)) { if (_open) ClosePanel(); else _open = true; }
+            // Consumed here (Update), never inside Draw()/OnGUI: mutating _open mid-OnGUI can
+            // desync IMGUI's Layout/Repaint bookkeeping for the frame that just requested it
+            // (the same class of bug Contracts hit with its board toggle).
+            if (_pendingLauncherToggle)
+            {
+                _pendingLauncherToggle = false;
+                if (_open) ClosePanel(); else _open = true;
+            }
             float now = Time.unscaledTime;
             PvpTemporaryCloneFactory.Tick();
             if (HasPending && now >= _pendingExpires) ClearPending();
@@ -263,7 +272,7 @@ namespace ErenshorPvP
             _launcherRect = ClampLauncherRect(_launcher.Draw(_launcherRect, _open, Enabled));
             if (!RectsNearlyEqual(previous, _launcherRect)) PersistLauncherRect();
             _quickToggleRect = _launcherRect;
-            if (_launcher.RequestToggle) { if (_open) ClosePanel(); else _open = true; }
+            if (_launcher.RequestToggle) _pendingLauncherToggle = true;
         }
 
         private static Rect ResolveInitialLauncherRect()
@@ -527,7 +536,7 @@ namespace ErenshorPvP
         internal static void SceneTransition() { ClearPending(); PvpTemporaryCloneFactory.Despawn("scene_transition"); _nextScan = Time.unscaledTime + 12f; if (_nextAmbush < Time.unscaledTime + 300f) _nextAmbush = Time.unscaledTime + 300f; }
         // Restoring the camera explicitly matters: unpatching mid-frame could otherwise leave
         // the orbit speeds zeroed with no postfix left to put them back.
-        internal static void Shutdown() { ClearPending(); PvpTemporaryCloneFactory.Shutdown(); _open = false; PvpPanel.Dispose(); PvpCameraLookPatch.Restore(); if (_launcher != null) { _launcher.Dispose(); _launcher = null; } _launcherRectInitialized = false; }
+        internal static void Shutdown() { ClearPending(); PvpTemporaryCloneFactory.Shutdown(); _open = false; PvpPanel.Dispose(); PvpCameraLookPatch.Restore(); if (_launcher != null) { _launcher.Dispose(); _launcher = null; } _launcherRectInitialized = false; _pendingLauncherToggle = false; }
 
         private static string Plan(string option)
         {
