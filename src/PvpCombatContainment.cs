@@ -449,7 +449,9 @@ namespace ErenshorPvP
                     "; defenders=" + Defenders.Count + "; defender_pets=" + DefenderPets.Count +
                     "; damage_to_attackers=" + _damageToAttackers + "; pet_damage=" + _petDamageToAttackers +
                     "; healing_to_attackers=" + _healingToAttackers +
-                    "; damage_to_defenders=" + _damageToDefenders + "; healing_to_defenders=" + _healingToDefenders);
+                    "; damage_to_defenders=" + _damageToDefenders + "; healing_to_defenders=" + _healingToDefenders +
+                    "; " + PvpTemporaryCloneFactory.BalanceRuntimeSummary() +
+                    "; healing_assessment=" + PvpTemporaryCloneFactory.BalanceHealingAssessment(_healingToAttackers));
             }
             catch { }
         }

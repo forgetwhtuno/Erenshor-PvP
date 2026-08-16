@@ -35,7 +35,7 @@ namespace ErenshorPvP
         }
         public static string GetStatus() { return PvpController.HubStatus(); }
         public static bool OpenPanel() { if (!SuiteUiPolicy.IsGameplayReady()) return false; PvpController.RequestOpenPanel(); return true; }
-        public static bool ClosePanel() { PvpController.RequestClosePanel(); return true; }
+        public static bool ClosePanel() { PvpController.ClosePanel(); return !PvpController.PanelOpen; }
         public static bool ResetPanelPosition() { PvpController.ResetPanelPosition(); return true; }
         public static bool ResetLauncherPosition() { PvpController.ResetLauncherPosition(); return true; }
         public static bool TogglePanel() { if (!SuiteUiPolicy.IsGameplayReady()) return false; if (PvpController.PanelOpen) PvpController.RequestClosePanel(); else PvpController.RequestOpenPanel(); return true; }

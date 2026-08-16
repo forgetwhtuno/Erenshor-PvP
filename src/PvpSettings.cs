@@ -118,6 +118,9 @@ namespace ErenshorPvP
         [Config("NextEligibleUtcTicks", "Rewards", "Internal anti-farm timestamp. Do not edit while a match is active.")]
         public long NextEligibleUtcTicks = 0L;
 
+        [Config("LastClaimedMatchId", "Rewards", "Internal durable claim marker. A completed PvP match can claim rewards at most once.")]
+        public string LastClaimedRewardMatchId = "";
+
         [Config("CosmeticChancePercent", "Rewards", "Deprecated and ignored. Cosmetic rewards are disabled until a slot-safe native unlock API is verified.")]
         public int CosmeticChancePercent = 0;
 

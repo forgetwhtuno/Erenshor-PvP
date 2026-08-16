@@ -16,6 +16,7 @@ namespace ErenshorPvP
 
         private IAuraProvider<string> _describe;
         private IAuraProvider<string> _basicSettings;
+        private IAuraProvider<string> _uiState;
         private IAuraProvider<string, string, string> _settingSet;
         private IAuraProvider<string, string, string> _action;
         private string _version = "0.0.0";
@@ -37,6 +38,9 @@ namespace ErenshorPvP
 
                 _basicSettings = owner.IPCAuraProvider<string>(Prefix + "settings.basic");
                 _basicSettings.RegisterFunc(BasicSettings);
+
+                _uiState = owner.IPCAuraProvider<string>(Prefix + "ui.state");
+                _uiState.RegisterFunc(UiState);
 
                 _settingSet = owner.IPCAuraProvider<string, string, string>(Prefix + "setting.set");
                 _settingSet.RegisterFunc(SetSetting);
@@ -60,6 +64,7 @@ namespace ErenshorPvP
         {
             SafeUnregister(_describe); _describe = null;
             SafeUnregister(_basicSettings); _basicSettings = null;
+            SafeUnregister(_uiState); _uiState = null;
             SafeUnregister(_settingSet); _settingSet = null;
             SafeUnregister(_action); _action = null;
             Registered = false;
@@ -92,6 +97,16 @@ namespace ErenshorPvP
                 return "protocol=1&module=" + PvpControlApi.ModuleId + "&display=Erenshor+PvP&version=" +
                     Uri.EscapeDataString(_version) + "&warning=" + Uri.EscapeDataString(ex.GetType().Name);
             }
+        }
+
+        private string UiState()
+        {
+            try
+            {
+                return PvpUiStatePolicy.Build(PvpControlApi.ModuleId, PvpController.PanelOpen,
+                    PvpPanel.CanvasSortOrder, PvpPanel.LastActivatedAt);
+            }
+            catch { return string.Empty; }
         }
 
         private string BasicSettings()

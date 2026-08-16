@@ -2,7 +2,17 @@
 
 Standalone MMO-style PvP encounters for Erenshor. Practice Duels remains friendly, consensual, and non-lethal for Sims already in the zone. Erenshor PvP selects off-map Sim profiles and runs lethal encounters with normal player death and respawn. World PvP contains both consensual arranged matches and rare non-consensual wild ambushes.
 
-Current development line: 0.5.0. Remaining work is tracked in [docs/PVP_TODO.md](docs/PVP_TODO.md); the most important remaining gate is live in-game validation of native combat, visuals, rewards, and the retained-uGUI panel.
+Current development line: 0.5.2. Remaining work is tracked in [docs/PVP_TODO.md](docs/PVP_TODO.md); the most important remaining gate is live in-game validation of native combat, visuals, rewards, and the retained-uGUI panel.
+
+### Temporary proxy startup boundary
+
+Synthetic PvP combat roots cloned from an already-running live scene NPC do not replay that
+borrowed creature's `NPC.Start` lifecycle after being converted into a non-persistent PvP identity.
+The bypass is registered-proxy-only and live-source-only; ordinary NPCs are untouched and
+resource-prefab proxies retain native startup until that lifecycle is proven separately. Before
+lethal combat, PvP verifies the Character/NPC/Stats/CastSpell/NavMesh graph and reasserts/verifies
+the no-XP/boss-XP/quest/faction/loot reward boundary. Runtime diagnostics identify proxy native-start
+entry/completion and summarize attack/heal checks and spell starts without changing balance.
 
 ## Status: native Lunaris migration candidate
 
@@ -56,7 +66,11 @@ Tabs:
 - **SCORE** — arranged/ambush record, escapes, last result, reward state, and anti-farm cooldown.
 - **DEBUG** — only when `/epvp debug` enables it. It contains bounded verification/status controls. Spawn/target/fight clone probes remain command-only development tools and are not production panel buttons.
 
-All panel mutations route through `PvpControlApi` and then the existing controller/services. The UI does not directly own matchmaking, proxy spawning, combat, damage, rewards, persistence, or encounter outcomes. A legacy F10 toggle remains in the controller for compatibility with existing users, but it is not the normal or documented access requirement.
+All panel mutations route through `PvpControlApi` and then the existing controller/services. The UI does not directly own matchmaking, proxy spawning, combat, damage, rewards, persistence, or encounter outcomes. Normal access is through the retained launcher or Suite Hub; `/epvp` remains the command recovery/debug surface. No global panel hotkey is polled.
+
+For Suite quick-close, PvP now exposes `ui.state` alongside its existing visual-only `closePanel` action. The state reports the retained panel's actual Canvas sort order plus a monotonic activation timestamp, so a verified centralized Hub can order it against other Suite windows. Closing the PvP panel never ends the current PvP encounter.
+
+Drag/camera ownership starts on **left pointer-down before Unity's drag threshold**, not only at BeginDrag. It is reasserted only while PvP owns that gesture and is force-released on pointer-up/end-drag, focus/pause loss, UI hide, reset-position actions, scene transitions, panel close, disable/destroy, and plugin unload. No EditUIMode or camera Harmony patch is used.
 
 ## Commands
 

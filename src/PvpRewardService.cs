@@ -15,6 +15,7 @@ namespace ErenshorPvP
         private static PvpConfigEntry<int> _goldPerTwoLevels;
         private static PvpConfigEntry<int> _cooldownMinutes;
         private static PvpConfigEntry<long> _nextRewardUtcTicks;
+        private static PvpConfigEntry<string> _lastClaimedMatchId;
         private static PvpConfigEntry<int> _cosmeticChancePercent;
 
         internal static void Initialize(PvpSettings settings)
@@ -24,6 +25,7 @@ namespace ErenshorPvP
             _goldPerTwoLevels = new PvpConfigEntry<int>(() => settings.GoldPerTwoLevels, v => settings.GoldPerTwoLevels = v);
             _cooldownMinutes = new PvpConfigEntry<int>(() => settings.VictoryCooldownMinutes, v => settings.VictoryCooldownMinutes = v);
             _nextRewardUtcTicks = new PvpConfigEntry<long>(() => settings.NextEligibleUtcTicks, v => settings.NextEligibleUtcTicks = v);
+            _lastClaimedMatchId = new PvpConfigEntry<string>(() => settings.LastClaimedRewardMatchId, v => settings.LastClaimedRewardMatchId = v);
             _cosmeticChancePercent = new PvpConfigEntry<int>(() => settings.CosmeticChancePercent, v => settings.CosmeticChancePercent = v);
         }
 
@@ -60,13 +62,23 @@ namespace ErenshorPvP
             return "victory_rewards=" + (Enabled ? (percent + "% level XP + level-based gold; " + minutes + "m cooldown") : "off") + "; cosmetics=disabled_pending_safe_api";
         }
 
-        internal static string GrantVictory(Character player) { return GrantVictory(player, null); }
+        internal static string GrantVictory(Character player) { return GrantVictory(string.Empty, player, null); }
 
         internal static string GrantVictory(Character player, IList<PvpOpponentProfile> opponents)
+        { return GrantVictory(string.Empty, player, opponents); }
+
+        // Claim the match before mutating XP or inventory. If saving the marker fails we do not
+        // pay; if a later native award call fails the marker remains, deliberately preferring a
+        // withheld reward to a duplicate after reload or a repeated terminal callback.
+        internal static string GrantVictory(string matchId, Character player, IList<PvpOpponentProfile> opponents)
         {
             if (!Enabled) return "[Erenshor PvP] Victory recorded. Rewards are disabled in config.";
             if (player == null || player.MyStats == null || GameData.PlayerInv == null)
                 return "[Erenshor PvP] Victory recorded, but reward state was unavailable; no reward granted.";
+            if (string.IsNullOrWhiteSpace(matchId))
+                return "[Erenshor PvP] Victory recorded, but this was not a match-backed encounter; no reward granted.";
+            if (_lastClaimedMatchId != null && string.Equals(_lastClaimedMatchId.Value, matchId, StringComparison.Ordinal))
+                return "[Erenshor PvP] Victory recorded. This match's reward was already claimed.";
             if (DateTime.UtcNow.Ticks < _nextRewardUtcTicks.Value)
                 return "[Erenshor PvP] Victory recorded. Reward withheld by the anti-farm cooldown.";
 
@@ -84,18 +96,26 @@ namespace ErenshorPvP
                 int xp = CalculateVictoryXp(threshold, _xpFraction.Value, riskScale);
                 int gold = Math.Max(1, Mathf.RoundToInt(((level + 1) / 2f) * Math.Max(1, Math.Min(100, _goldPerTwoLevels.Value)) * riskScale));
 
+                long previousCooldown = _nextRewardUtcTicks.Value;
+                string previousClaim = _lastClaimedMatchId == null ? string.Empty : _lastClaimedMatchId.Value;
+                _nextRewardUtcTicks.Value = DateTime.UtcNow.AddMinutes(Math.Max(5, Math.Min(240, _cooldownMinutes.Value))).Ticks;
+                _lastClaimedMatchId.Value = matchId;
+                if (!PvpController.TryPersistSettings())
+                {
+                    _nextRewardUtcTicks.Value = previousCooldown;
+                    _lastClaimedMatchId.Value = previousClaim;
+                    return "[Erenshor PvP] Victory recorded, but the reward claim could not be saved; no reward granted.";
+                }
+
                 // false keeps this a fixed PvP award rather than a normal NPC kill subject to group modifiers.
                 GameData.AddExperience(xp, false);
                 GameData.PlayerInv.Gold += gold;
                 GameData.PlayerInv.UpdatePlayerInventory();
-
-                _nextRewardUtcTicks.Value = DateTime.UtcNow.AddMinutes(Math.Max(5, Math.Min(240, _cooldownMinutes.Value))).Ticks;
-                PvpController.PersistSettings();
                 return "[Erenshor PvP] Victory rewards (" + opponentCount + " attackers, avg level " + Mathf.RoundToInt(averageOpponentLevel) + "): +" + xp + " XP and +" + gold + " gold.";
             }
             catch (Exception ex)
             {
-                return "[Erenshor PvP] Victory recorded, but rewards failed safely (" + ex.GetType().Name + ").";
+                return "[Erenshor PvP] Victory recorded, but the durable reward claim was retained after a native award failure (" + ex.GetType().Name + "); no retry will occur.";
             }
         }
 
