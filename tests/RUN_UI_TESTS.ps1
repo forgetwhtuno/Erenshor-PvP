@@ -10,6 +10,7 @@ $csc=Find-Csc; $out=Join-Path $env:TEMP "ErenshorPvP.UiPolicyTests.exe"
   (Join-Path $Root "src\SuiteLauncherPolicy.cs") `
   (Join-Path $Root "src\PvpHubPresentation.cs") `
   (Join-Path $Root "src\PvpUiPresentation.cs") `
+  (Join-Path $Root "src\PvpWindowChromePolicy.cs") `
   (Join-Path $Root "src\PvpUiStatePolicy.cs") `
   (Join-Path $Root "src\PvpProxyStartupPolicy.cs") `
   (Join-Path $Root "src\PvpPointerOwnershipState.cs") `
@@ -33,3 +34,33 @@ if ($controllerSource -notmatch 'pvp_disabled' -or $controllerSource -notmatch '
 if ($controllerSource -notmatch '_nextOffer < Time\.unscaledTime \+ 300f') { throw "PvP lifecycle guard failed: zoning restart delay missing." }
 if ($auraSource -notmatch 'Prefix \+ "ui\.state"' -or $auraSource -notmatch 'PvpUiStatePolicy\.Build') { throw "PvP Suite guard failed: ui.state provider missing." }
 Write-Host "PvP drag/Suite release source guards: PASS" -ForegroundColor Green
+
+# Native-runtime regression guard: NPC.Start may be bypassed only after NPC-side maintenance
+# state is bound, and the fail-safe must discriminate registered PvP proxies from vanilla NPCs.
+$factorySource = Get-Content (Join-Path $Root "src\PvpTemporaryCloneFactory.cs") -Raw
+$startupSource = Get-Content (Join-Path $Root "src\PvpProxyStartupPolicy.cs") -Raw
+$rewardSource = Get-Content (Join-Path $Root "src\PvpRewardService.cs") -Raw
+foreach ($token in @('TrySetField(npc, "Myself", actor)', 'TrySetField(npc, "MyStats"', 'TrySetField(npc, "MyNav", nav)', 'TrySetField(npc, "MySpells", caster)', 'NameFlash', 'HandleMaintenaceAndCounters', 'AllowNativeMaintenance', 'runtime_invalid')) {
+  if ($factorySource -notmatch [regex]::Escape($token)) { throw "PvP native-runtime guard failed: missing $token" }
+}
+if ($startupSource -notmatch 'MaintenanceStatePasses' -or $startupSource -notmatch 'ShouldInterceptMaintenance') { throw "PvP native-runtime guard failed: state discriminator missing." }
+if ($factorySource -notmatch 'if \(!IsTemporaryNpc\(npc\)\) return true;') { throw "PvP native-runtime guard failed: vanilla NPC fail-open missing." }
+if ($factorySource -notmatch 'native_npc_exception method=NPC\.HandleMaintenaceAndCounters' -or $factorySource -notmatch '\[HarmonyFinalizer\]') { throw "PvP native-runtime guard failed: maintenance exception diagnostics missing." }
+if ($rewardSource -notmatch 'GameData\.AddExperience\(xp, false\)' -or $rewardSource -notmatch 'GameData\.PlayerInv\.Gold \+= gold' -or $rewardSource -notmatch 'UpdatePlayerInventory\(\)') { throw "PvP reward guard failed: working reward path changed." }
+Write-Host "PvP native NPC runtime/reward source guards: PASS" -ForegroundColor Green
+$launcherVisual = Get-Content (Join-Path $Root "src\StandaloneLauncherVisual.cs") -Raw
+if ($launcherVisual -notmatch 'Width\s*=\s*154f' -or $launcherVisual -notmatch 'Height\s*=\s*32f' -or
+    $launcherVisual -notmatch 'GripWidth\s*=\s*20f' -or $launcherVisual -notmatch '"GripDot"' -or
+    $panelSource -notmatch 'StyleGrip\(grip\)' -or $panelSource -notmatch 'PVP \[ON\]') {
+    throw "PvP Forgotten Roads launcher visual contract failed."
+}
+Write-Host "PvP Forgotten Roads launcher visual contract: PASS" -ForegroundColor Green
+$chromeSource = Get-Content (Join-Path $Root "src\PvpWindowChromePolicy.cs") -Raw
+if ($panelSource -notmatch 'AddVerticalChevron\(_collapseChevron, true\)' -or
+    $panelSource -notmatch 'private\s+static\s+void\s+SetCollapsed' -or
+    $panelSource -notmatch 'ApplyCollapsedVisibility' -or
+    $panelSource -notmatch 'PvpWindowChromePolicy\.PreserveTopBottomY' -or
+    $chromeSource -notmatch 'CollapsedHeight\s*=\s*HeaderHeight') {
+    throw "PvP Forgotten Roads header collapse contract failed."
+}
+Write-Host "PvP Forgotten Roads header collapse contract: PASS" -ForegroundColor Green

@@ -29,6 +29,8 @@ namespace ErenshorPvP
         private static readonly Dictionary<int, int> SpellStartCounts = new Dictionary<int, int>();
         private static readonly Dictionary<int, int> LastSpellStartFrame = new Dictionary<int, int>();
         private static readonly HashSet<int> NativeStartBypassEligible = new HashSet<int>();
+        private static bool _runtimeInvalidCleanupQueued;
+        private static string _runtimeInvalidReason = string.Empty;
         private static float _despawnAt;
         private static string _activeMatchId;
         private static PvpEncounterMode _activeMode = PvpEncounterMode.Arranged;
@@ -43,6 +45,12 @@ namespace ErenshorPvP
 
         internal static void Tick()
         {
+            if (_runtimeInvalidCleanupQueued)
+            {
+                _runtimeInvalidCleanupQueued = false;
+                Despawn("runtime_invalid");
+                return;
+            }
             PvpCombatContainment.Tick();
             if (TeamClones.Count > 0 && Time.unscaledTime >= _despawnAt) Despawn("timer");
         }
@@ -141,6 +149,8 @@ namespace ErenshorPvP
                 if (spells != null) spells.enabled = false;
                 if (nav != null) nav.enabled = false;
 
+                ConfigureNativeMaintenanceState(npc, actor, spells, nav);
+
                 if (profile != null) AttachSimVisualShell(clone, profile);
                 try
                 {
@@ -158,6 +168,15 @@ namespace ErenshorPvP
                 if ((_templateSource ?? string.Empty).StartsWith("live:", StringComparison.OrdinalIgnoreCase))
                     NativeStartBypassEligible.Add(clone.GetInstanceID());
                 if (_clone == null) { _clone = clone; _activeProfile = profile; }
+                string runtimeState;
+                bool runtimeReady = ValidateNativeMaintenanceState(npc, actor, actor == null ? null : actor.MyStats, spells, nav, out runtimeState);
+                PvpDiagnostics.Log("proxy_runtime_state proxy=" + proxyName + "; requiredRuntimeState=" +
+                    (runtimeReady ? "PASS" : "FAIL") + "; missing=" + runtimeState + "; template=" + _templateSource);
+                if (!runtimeReady)
+                {
+                    Despawn("runtime_state_missing");
+                    return "[Erenshor PvP] Clone test blocked: temporary opponent native runtime is incomplete.";
+                }
                 _despawnAt = Time.unscaledTime + 20f;
                 ErenshorPvpEvents.Publish(new PvpSemanticEvent("pvp_proxy_spawned", _activeMatchId, proxyName,
                     UnityEngine.SceneManagement.SceneManager.GetActiveScene().name, "visual_test", "inert_temporary_actor"));
@@ -345,7 +364,7 @@ namespace ErenshorPvP
                 NativeStartBypassEligible.Remove(member.GetInstanceID());
                 try { UnityEngine.Object.Destroy(member); } catch { }
             }
-            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); EligibleHealSpellCounts.Clear(); AttackDecisionCounts.Clear(); HealCheckCounts.Clear(); SpellStartCounts.Clear(); LastSpellStartFrame.Clear(); NativeStartBypassEligible.Clear(); DestroyTemporarySpells();
+            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); EligibleHealSpellCounts.Clear(); AttackDecisionCounts.Clear(); HealCheckCounts.Clear(); SpellStartCounts.Clear(); LastSpellStartFrame.Clear(); NativeStartBypassEligible.Clear(); _runtimeInvalidCleanupQueued = false; _runtimeInvalidReason = string.Empty; DestroyTemporarySpells();
             ErenshorPvpEvents.Publish(new PvpSemanticEvent("pvp_proxy_despawned", string.Empty, "PvP Proxy",
                 string.Empty, "cleanup", reason ?? "manual"));
             PvpController.EncounterCleaned();
@@ -405,15 +424,92 @@ namespace ErenshorPvP
             try { statsLinksActor = stats != null && stats.Myself == actor; } catch { }
             bool persistent = false;
             try { persistent = (sim != null && (sim.enabled || sim.MySimTracking != null || sim.myIndex >= 0)) || (npc != null && (npc.SimPlayer || npc.ThisSim != null)); } catch { persistent = true; }
+            string maintenanceReason;
+            bool maintenance = ValidateNativeMaintenanceState(npc, actor, stats, caster, nav, out maintenanceReason);
             bool pass = PvpProxyStartupPolicy.InvariantPasses(TeamClones.Contains(go), npc != null, actor != null, stats != null,
                 actorLinksNpc, statsLinksActor, caster != null, nav != null, persistent);
+            pass = pass && maintenance;
             if (!pass)
             {
                 reason = "registered=" + TeamClones.Contains(go) + ",npc=" + (npc != null) + ",character=" + (actor != null) +
                     ",stats=" + (stats != null) + ",actorNpc=" + actorLinksNpc + ",statsActor=" + statsLinksActor +
-                    ",caster=" + (caster != null) + ",nav=" + (nav != null) + ",persistent=" + persistent;
+                    ",caster=" + (caster != null) + ",nav=" + (nav != null) + ",persistent=" + persistent +
+                    ",maintenance=" + maintenanceReason;
             }
             return pass;
+        }
+
+        private static void ConfigureNativeMaintenanceState(NPC npc, Character actor, CastSpell caster, NavMeshAgent nav)
+        {
+            if (npc == null) return;
+            try
+            {
+                // These are exactly the references NPC.Start normally binds before Update begins.
+                // Do not invoke Start: it rebuilds a borrowed creature identity and source state.
+                TrySetField(npc, "Myself", actor);
+                TrySetField(npc, "MyStats", actor == null ? null : actor.MyStats);
+                TrySetField(npc, "MySpells", caster);
+                TrySetField(npc, "MyNav", nav);
+                TrySetField(npc, "MyCharControl", npc.GetComponent<CharacterController>());
+                TrySetField(npc, "MyRaidSlot", null);
+                object currentFlash;
+                if (!TryReadField(npc, "NameFlash", out currentFlash) || currentFlash == null)
+                {
+                    FlashUIColors flash = null;
+                    object namePlateObject;
+                    if (TryReadField(npc, "NamePlateObject", out namePlateObject) && namePlateObject is Component)
+                        flash = ((Component)namePlateObject).GetComponent<FlashUIColors>();
+                    object namePlate;
+                    if (flash == null && TryReadField(npc, "NamePlate", out namePlate) && namePlate is Component)
+                        flash = ((Component)namePlate).GetComponent<FlashUIColors>();
+                    if (flash == null) flash = npc.GetComponentInChildren<FlashUIColors>(true);
+                    TrySetField(npc, "NameFlash", flash);
+                }
+            }
+            catch { }
+        }
+
+        private static bool ValidateNativeMaintenanceState(NPC npc, Character actor, Stats stats,
+            CastSpell caster, NavMeshAgent nav, out string reason)
+        {
+            bool self = false, boundStats = false, boundNav = false, boundCaster = false, flash = false, raidClear = false;
+            try
+            {
+                object value;
+                self = npc != null && TryReadField(npc, "Myself", out value) && object.ReferenceEquals(value, actor);
+                boundStats = npc != null && TryReadField(npc, "MyStats", out value) && object.ReferenceEquals(value, stats);
+                boundNav = npc != null && TryReadField(npc, "MyNav", out value) && object.ReferenceEquals(value, nav);
+                boundCaster = npc != null && TryReadField(npc, "MySpells", out value) && object.ReferenceEquals(value, caster);
+                flash = npc != null && TryReadField(npc, "NameFlash", out value) && value != null;
+                raidClear = npc != null && TryReadField(npc, "MyRaidSlot", out value) && value == null;
+            }
+            catch { }
+            bool pass = PvpProxyStartupPolicy.MaintenanceStatePasses(npc != null && TeamClones.Contains(npc.gameObject),
+                self, boundStats, boundNav, boundCaster, flash, raidClear);
+            reason = pass ? "pass" : "self=" + self + ",stats=" + boundStats + ",nav=" + boundNav +
+                ",caster=" + boundCaster + ",nameFlash=" + flash + ",raidSlotClear=" + raidClear;
+            return pass;
+        }
+
+        internal static bool AllowNativeMaintenance(NPC npc)
+        {
+            if (!IsTemporaryNpc(npc)) return true;
+            Character actor = npc == null ? null : npc.GetComponent<Character>();
+            Stats stats = actor == null ? null : actor.MyStats;
+            CastSpell caster = npc == null ? null : npc.GetComponent<CastSpell>();
+            NavMeshAgent nav = npc == null ? null : npc.GetComponent<NavMeshAgent>();
+            string reason;
+            bool valid = ValidateNativeMaintenanceState(npc, actor, stats, caster, nav, out reason);
+            if (!PvpProxyStartupPolicy.ShouldInterceptMaintenance(true, valid)) return true;
+            if (!_runtimeInvalidCleanupQueued)
+            {
+                _runtimeInvalidCleanupQueued = true;
+                _runtimeInvalidReason = reason;
+                PvpDiagnostics.Log("proxy_runtime_invalid proxy=" + SafeProxyName(npc) + "; missing=" + reason +
+                    "; action=cancel_and_cleanup; template=" + _templateSource);
+                try { PvpCombatContainment.End("runtime_invalid"); } catch { }
+            }
+            return false;
         }
 
         internal static bool AllowNativeNpcStart(NPC npc, out bool temporaryNativeStartExpected)
@@ -802,6 +898,20 @@ namespace ErenshorPvP
             catch { return false; }
         }
 
+        private static bool TryReadField(object instance, string name, out object value)
+        {
+            value = null;
+            try
+            {
+                FieldInfo field = instance == null ? null : instance.GetType().GetField(name,
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (field == null) return false;
+                value = field.GetValue(instance);
+                return true;
+            }
+            catch { return false; }
+        }
+
         private static void TrySetField(object instance, string name, object value)
         {
             try
@@ -821,7 +931,12 @@ namespace ErenshorPvP
                     if (npc == null || npc.gameObject == null || !npc.gameObject.activeInHierarchy) continue;
                     if (!IsEligibleCombatTemplate(npc)) continue;
                     Character actor = npc.GetComponent<Character>();
-                    if (actor != null && actor.MyStats != null && actor.Alive) { _templateSource = "live:" + npc.gameObject.name; return npc.gameObject; }
+                    if (actor != null && actor.MyStats != null && actor.Alive)
+                    {
+                        _templateSource = "live:" + npc.gameObject.name;
+                        PvpDiagnostics.Log("template_runtime_state template=" + _templateSource + "; " + DescribeNativeMaintenanceState(npc));
+                        return npc.gameObject;
+                    }
                 }
             }
             catch { }
@@ -844,6 +959,19 @@ namespace ErenshorPvP
             catch { }
             _templateSource = "unavailable";
             return null;
+        }
+
+        private static string DescribeNativeMaintenanceState(NPC npc)
+        {
+            object value;
+            bool self = TryReadField(npc, "Myself", out value) && value != null;
+            bool stats = TryReadField(npc, "MyStats", out value) && value != null;
+            bool nav = TryReadField(npc, "MyNav", out value) && value != null;
+            bool caster = TryReadField(npc, "MySpells", out value) && value != null;
+            bool flash = TryReadField(npc, "NameFlash", out value) && value != null;
+            bool raid = TryReadField(npc, "MyRaidSlot", out value) && value != null;
+            return "npcMyself=" + self + "; npcMyStats=" + stats + "; npcMyNav=" + nav +
+                "; npcMySpells=" + caster + "; nameFlash=" + flash + "; raidSlot=" + raid;
         }
 
         // Companion bodies have very different scale, animation, and stat lifecycles from normal
@@ -1229,6 +1357,31 @@ namespace ErenshorPvP
                     (__instance == null ? "null" : __instance.gameObject.name) + "; error=" + __exception.GetType().Name);
             // Diagnostics only: return the original exception unchanged. Never suppress a native
             // NPC.Start failure for resource-prefab proxies or ordinary game NPCs.
+            return __exception;
+        }
+    }
+
+    // The native maintenance method is never changed for vanilla NPCs. It only prevents an
+    // already-identified invalid temporary proxy from throwing every frame while the factory
+    // closes and destroys that match on its next Tick.
+    [HarmonyPatch(typeof(NPC), "HandleMaintenaceAndCounters")]
+    internal static class PvpTemporaryNpcMaintenancePatch
+    {
+        [HarmonyPrefix]
+        private static bool Prefix(NPC __instance)
+        {
+            return PvpTemporaryCloneFactory.AllowNativeMaintenance(__instance);
+        }
+
+        [HarmonyFinalizer]
+        private static Exception Finalizer(NPC __instance, Exception __exception)
+        {
+            if (__exception != null && PvpTemporaryCloneFactory.IsTemporaryNpc(__instance))
+                PvpDiagnostics.Warning("native_npc_exception method=NPC.HandleMaintenaceAndCounters; proxy=" +
+                    (__instance == null || __instance.gameObject == null ? "null" : __instance.gameObject.name) +
+                    "; error=" + __exception.GetType().Name);
+            // Diagnostic only. Never suppress an exception that escaped the proven temporary-proxy
+            // maintenance precondition; live acceptance must prove the current native path stays clean.
             return __exception;
         }
     }

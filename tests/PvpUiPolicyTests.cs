@@ -16,6 +16,10 @@ internal static class PvpUiPolicyTests
             Assert(PvpUiPresentation.ToggleLabel("Arranged Challenges", false) == "Arranged Challenges [OFF]", "explicit arranged OFF label");
             Assert(PvpUiPresentation.ToggleLabel("Wild Ambushes", true) == "Wild Ambushes [ON]", "explicit ambush ON label");
             Assert(PvpUiPresentation.RunSelfTests().StartsWith("PASS", StringComparison.Ordinal), "explicit toggle presentation policy");
+            Assert(PvpWindowChromePolicy.RunSelfTests().StartsWith("PASS", StringComparison.Ordinal), "Forgotten Roads PvP header collapse policy");
+            Assert(PvpWindowChromePolicy.ChevronPointsUp(false), "expanded PvP header points up to collapse");
+            Assert(!PvpWindowChromePolicy.ChevronPointsUp(true), "collapsed PvP header points down to expand");
+            Assert(Math.Abs(PvpWindowChromePolicy.PreserveTopBottomY(100f, 520f, 34f) - 586f) < .001f, "collapse preserves visual top edge");
             string uiState = PvpUiStatePolicy.Build("pvp", true, 520, 4.25d);
             Assert(Field(uiState, "module") == "pvp" && Field(uiState, "open") == "true" &&
                 Field(uiState, "closeable") == "true", "PvP ui.state advertises visual close contract");
@@ -30,6 +34,12 @@ internal static class PvpUiPolicyTests
             Assert(!PvpProxyStartupPolicy.ShouldRunNativeNpcStart(true, true), "live native NPC.Start bypass is temporary-proxy-only");
             Assert(PvpProxyStartupPolicy.ShouldRunNativeNpcStart(false, true), "ordinary native NPC.Start remains untouched");
             Assert(PvpProxyStartupPolicy.ShouldRunNativeNpcStart(true, false), "resource-prefab proxy retains unproven native Start lifecycle");
+            Assert(PvpProxyStartupPolicy.MaintenanceStatePasses(true, true, true, true, true, true, true), "proxy maintenance invariant accepts NPC-side runtime state");
+            Assert(!PvpProxyStartupPolicy.MaintenanceStatePasses(true, true, false, true, true, true, true), "proxy maintenance invariant rejects missing NPC.MyStats");
+            Assert(!PvpProxyStartupPolicy.MaintenanceStatePasses(true, true, true, true, true, false, true), "proxy maintenance invariant rejects missing NameFlash");
+            Assert(PvpProxyStartupPolicy.ShouldInterceptMaintenance(true, false), "invalid temporary proxy is intercepted for terminal cleanup");
+            Assert(!PvpProxyStartupPolicy.ShouldInterceptMaintenance(false, false), "vanilla NPC is never intercepted by PvP failsafe");
+            Assert(!PvpProxyStartupPolicy.ShouldInterceptMaintenance(true, true), "valid temporary proxy keeps native maintenance");
             Assert(PvpProxyStartupPolicy.RewardBoundaryPasses(true, true, true, true, true, true, true), "reward boundary accepts fully suppressed proxy");
             Assert(!PvpProxyStartupPolicy.RewardBoundaryPasses(false, true, true, true, true, true, true), "reward boundary rejects unreadable/nonzero borrowed XP");
             Assert(!PvpProxyStartupPolicy.RewardBoundaryPasses(true, true, true, true, true, false, true), "reward boundary rejects native loot gold");

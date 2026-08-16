@@ -1,5 +1,13 @@
 # Changelog
 
+
+## 0.5.4 - Forgotten Roads release/discoverability correctness
+
+- Preserved the narrow temporary-proxy `NPC.HandleMaintenaceAndCounters` containment repair; no native combat-math redesign.
+- Added the Forgotten Roads retained-uGUI module header contract to the PvP panel: one robust chevron left of `PVP`, header-only collapse, and X close.
+- Collapse/expand preserves the panel top edge, keeps drag/camera ownership cleanup, and hides the body while collapsed.
+- Release/live acceptance remains required for two consecutive 5v5 matches and reward/cleanup proof.
+
 ## 0.5.2 - Suite close contract / drag release hardening
 
 - Added the missing Suite `ui.state` Aura provider for the retained PvP panel, including actual Canvas sort order and activation time; existing `closePanel` is now a complete quick-close contract.
@@ -183,3 +191,7 @@
 - Kept standalone commands and core gameplay authority intact.
 - Documented the retained panel/launcher policy and Lunaris live-test requirement.
 - Reworked only panel/launcher interaction: runtime Rect now owns drag position, header-only drag persists after the gesture, and camera/target containment covers the full drag. PvP gameplay paths are unchanged.
+## 0.5.3 - Forgotten Roads launcher/header chrome
+
+- Standardized the standalone retained-uGUI launcher at 154x32 with restrained `[ON]`/`[OFF]` status and programmatic grip marks.
+- Standardized compact title and close-button dimensions without changing PvP gameplay or panel contents.

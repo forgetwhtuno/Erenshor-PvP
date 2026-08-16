@@ -6,7 +6,7 @@ using UnityEngine.SceneManagement;
 
 namespace ErenshorPvP
 {
-    [LunarisPlugin("forgetwhtuno.erenshor.pvp", "0.5.2", "forgetwhtuno",
+    [LunarisPlugin("forgetwhtuno.erenshor.pvp", "0.5.4", "forgetwhtuno",
         "Standalone MMO-style PvP encounters for Erenshor: consensual arranged challenges and rare wild ambushes against off-map Sim proxies, with real player death/respawn.")]
     [LunarisPermission(LunarisPermission.Reflection | LunarisPermission.Harmony)]
     public sealed class ErenshorPvPPlugin : LunarisPlugin
@@ -37,7 +37,8 @@ namespace ErenshorPvP
             }
             catch (Exception ex) { Logging.LogError("PvP Suite Aura provider setup failed: " + ex); }
 
-            Logging.LogInfo("Erenshor PvP 0.5.2 loaded. Disabled by default; use the retained PvP panel (or /epvp compatibility commands) to opt in.");
+            Logging.LogInfo("Erenshor PvP 0.5.4 loaded. Disabled by default; use the retained PvP panel (or /epvp compatibility commands) to opt in.");
+            Logging.LogInfo("PvP runtime marker: plugin_identity=ErenshorPvP; revision=pvp-0.5.4-maintenance-r2");
         }
 
         private void Update()

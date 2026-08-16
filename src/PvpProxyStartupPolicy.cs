@@ -22,6 +22,23 @@ namespace ErenshorPvP
             return !registeredTemporaryProxy || !clonedFromLiveStartedNpc;
         }
 
+        // HandleMaintenaceAndCounters dereferences NPC.MyStats every frame and dereferences
+        // NPC.Myself/NameFlash when an aggro target exists. These are NPC-owned runtime fields;
+        // Character.MyStats alone is not sufficient proof that a cloned NPC can enter Update.
+        internal static bool MaintenanceStatePasses(bool registeredTemporaryProxy, bool npcLinksCharacter,
+            bool npcLinksStats, bool npcLinksNav, bool npcLinksCaster, bool hasNameFlash, bool raidSlotClear)
+        {
+            return registeredTemporaryProxy && npcLinksCharacter && npcLinksStats && npcLinksNav &&
+                   npcLinksCaster && hasNameFlash && raidSlotClear;
+        }
+
+        internal static bool ShouldInterceptMaintenance(bool registeredTemporaryProxy, bool maintenanceStateValid)
+        {
+            // Fail open for every vanilla NPC. An invalid registered PvP proxy is skipped only
+            // long enough for the PvP factory to terminate and destroy the encounter.
+            return registeredTemporaryProxy && !maintenanceStateValid;
+        }
+
         internal static bool RewardBoundaryPasses(bool xpReadableAndZero, bool bossXpZero, bool bonusXpZero,
             bool questNull, bool factionEmpty, bool lootGoldZero, bool lootDisabled)
         {
