@@ -44,6 +44,7 @@ namespace ErenshorPvP
         private static PvpEncounterFlavor _pendingFlavor;
         private static readonly Dictionary<string, float> Cooldowns = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
         private static bool _open;
+        private static PvpMatchLifecyclePolicy _lifecycle = new PvpMatchLifecyclePolicy(false);
 
         internal static bool Enabled { get { return _enabled != null && _enabled.Value; } }
         internal static bool ShowLauncherPreference { get { return _showQuickToggle == null || _showQuickToggle.Value; } }
@@ -73,6 +74,7 @@ namespace ErenshorPvP
             _validationLogging = new PvpConfigEntry<bool>(() => settings.ValidationLogging, v => settings.ValidationLogging = v);
             PvpRewardService.Initialize(settings);
             PvpRecordService.Initialize(settings);
+            _lifecycle = new PvpMatchLifecyclePolicy(Enabled);
             PvpPanel.ConfigurePosition(_panelNormalizedX.Value, _panelNormalizedY.Value, _launcherNormalizedX.Value, _launcherNormalizedY.Value, PersistPanelPosition, PersistLauncherPosition);
             _nextScan = Time.unscaledTime + 12f;
             ScheduleNextAmbush(Time.unscaledTime);
@@ -83,8 +85,15 @@ namespace ErenshorPvP
         // (BepInEx's ConfigEntry persisted a .Value write on its own; Lunaris does not).
         internal static void PersistSettings()
         {
-            if (SaveSettings == null) return;
-            try { SaveSettings(); } catch { }
+            TryPersistSettings();
+        }
+
+        // Reward claiming needs to know whether its durable marker reached Lunaris before it
+        // touches inventory. Other settings remain best-effort for backwards compatibility.
+        internal static bool TryPersistSettings()
+        {
+            if (SaveSettings == null) return false;
+            try { SaveSettings(); return true; } catch { return false; }
         }
 
         internal static void Tick()
@@ -93,9 +102,9 @@ namespace ErenshorPvP
             {
                 ClearPending();
                 ClosePanel();
+                if (PvpTemporaryCloneFactory.HasActiveTeam) PvpTemporaryCloneFactory.Despawn("game_not_ready");
                 return;
             }
-            if (Input.GetKeyDown(KeyCode.F10)) { if (_open) ClosePanel(); else _open = true; }
             // Consume externally requested panel state on Update, outside retained-uGUI event callbacks.
             if (_pendingExternalClose)
             {
@@ -108,9 +117,15 @@ namespace ErenshorPvP
                 _open = true;
             }
             float now = Time.unscaledTime;
+            if (!Enabled)
+            {
+                ClearPending();
+                if (PvpTemporaryCloneFactory.HasActiveTeam) PvpTemporaryCloneFactory.Despawn("pvp_disabled");
+                return;
+            }
             PvpTemporaryCloneFactory.Tick();
             if (HasPending && now >= _pendingExpires) ClearPending();
-            if (!Enabled || HasPending || now < _nextScan || now < _nextOffer) return;
+            if (HasPending || now < _nextScan || now < _nextOffer) return;
             _nextScan = now + 12f;
             string scene = SceneManager.GetActiveScene().name;
             PvpEncounterMode mode = PvpEncounterMode.Arranged;
@@ -168,6 +183,7 @@ namespace ErenshorPvP
                 return;
             }
             _pendingTeam = team; _pendingName = team.LeaderName; _pendingMatchId = matchId; _pendingFlavor = flavor;
+            _lifecycle.Queue(matchId);
             _pendingExpires = now + 30f;
             _open = true;
             PvpPanel.ShowPendingChallenge();
@@ -304,7 +320,12 @@ namespace ErenshorPvP
             if (_enabled == null) return;
             _enabled.Value = value;
             PersistSettings();
-            if (!value) ClearPending();
+            if (!value || _lifecycle.State == PvpMatchLifecycleState.Disabled) _lifecycle.SetEnabled(value);
+            if (!value)
+            {
+                ClearPending();
+                if (PvpTemporaryCloneFactory.HasActiveTeam) PvpTemporaryCloneFactory.Despawn("pvp_disabled");
+            }
         }
 
         internal static void SetArrangedEnabled(bool value)
@@ -487,7 +508,17 @@ namespace ErenshorPvP
                 "; off_map_profiles=" + offMap + "; same_zone_profiles=" + sameZone + "; " + PvpTemporaryCloneFactory.DiagnosticStatus();
         }
 
-        internal static void SceneTransition() { PvpPanel.ReleaseDrag(); ClearPending(); PvpTemporaryCloneFactory.Despawn("scene_transition"); _nextScan = Time.unscaledTime + 12f; if (_nextAmbush < Time.unscaledTime + 300f) _nextAmbush = Time.unscaledTime + 300f; }
+        internal static void SceneTransition()
+        {
+            PvpPanel.ReleaseDrag();
+            ClearPending();
+            PvpTemporaryCloneFactory.Despawn("scene_transition");
+            // A scene transition never resumes the interrupted encounter or immediately rolls a
+            // replacement. A manual force request remains available after the destination loads.
+            _nextScan = Time.unscaledTime + 300f;
+            if (_nextOffer < Time.unscaledTime + 300f) _nextOffer = Time.unscaledTime + 300f;
+            if (_nextAmbush < Time.unscaledTime + 300f) _nextAmbush = Time.unscaledTime + 300f;
+        }
         // Hot unload releases retained UI, drag ownership, proxy state, and optional bridge state.
         internal static void Shutdown() { ClearPending(); PvpTemporaryCloneFactory.Shutdown(); _open = false; PvpPanel.Dispose(); _pendingExternalOpen = false; _pendingExternalClose = false; SuiteBridgeRegistered = false; SuiteUiPolicy.Reset(); }
 
@@ -634,6 +665,11 @@ namespace ErenshorPvP
 
         private static void StartEncounter(PvpTeamPlan team, string id, string name, PvpEncounterMode mode, PvpEncounterFlavor flavor)
         {
+            if (!_lifecycle.BeginSpawn(id))
+            {
+                Say("[Erenshor PvP] Encounter cancelled: lifecycle was not ready.");
+                return;
+            }
             MarkTeamCooldown(team, mode == PvpEncounterMode.Ambush ? 600f : 120f);
             string spawned = PvpTemporaryCloneFactory.SpawnTeam(team, id, mode, flavor == null ? string.Empty : flavor.Motive);
             if (spawned.IndexOf("spawned", StringComparison.OrdinalIgnoreCase) < 0)
@@ -641,8 +677,11 @@ namespace ErenshorPvP
                 PublishTerminalOnce("pvp_cancelled", id, name, SceneManager.GetActiveScene().name,
                     mode.ToString().ToLowerInvariant(), "proxy_spawn_failed");
                 Say("[Erenshor PvP] Encounter cancelled: " + spawned);
+                _lifecycle.BeginCleanup();
+                _lifecycle.CompleteCleanup(Enabled);
                 return;
             }
+            _lifecycle.SpawnSucceeded();
             string started = PvpTemporaryCloneFactory.BeginLethalFight();
             if (!PvpCombatContainment.LethalFightActive)
             {
@@ -703,7 +742,10 @@ namespace ErenshorPvP
                 if (member != null && member.Profile != null && !string.IsNullOrWhiteSpace(member.Profile.Name)) Cooldowns[member.Profile.Name] = until;
         }
 
-        private static void ClearPending() { _pendingName = string.Empty; _pendingTeam = null; _pendingMatchId = string.Empty; _pendingExpires = 0f; _pendingFlavor = null; }
+        private static void ClearPending() { _lifecycle.ClearPending(); _pendingName = string.Empty; _pendingTeam = null; _pendingMatchId = string.Empty; _pendingExpires = 0f; _pendingFlavor = null; }
+        // Called only after the factory has released combat target/navigation ownership and its
+        // temporary actor/spell collections. The duplicate-safe policy tolerates nested cleanup.
+        internal static void EncounterCleaned() { _lifecycle.BeginCleanup(); _lifecycle.CompleteCleanup(Enabled); }
         private static bool IsAlive(Character value) { try { return value != null && value.gameObject != null && value.gameObject.activeInHierarchy && value.Alive; } catch { return false; } }
         // An avatar can disappear briefly while the native manager pools or respawns it. CurScene
         // remains the authoritative location signal during that gap, so a same-zone Sim must not

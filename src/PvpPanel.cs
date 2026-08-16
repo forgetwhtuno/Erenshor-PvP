@@ -42,6 +42,27 @@ namespace ErenshorPvP
         private static Button _fleeButton;
         private static Button _ambushHereButton;
         private static Button _debugTabButton;
+        private static Button _enabledButton;
+        private static Button _arrangedButton;
+        private static Button _ambushButton;
+        private static bool _toggleVisualInitialized;
+        private static bool _lastEnabledVisual;
+        private static bool _lastArrangedVisual;
+        private static bool _lastAmbushVisual;
+
+        // Sim Actions visual language translated to retained uGUI: dark translucent blue,
+        // cyan/teal interaction surfaces, bright cyan headings, and compact high-contrast text.
+        private static readonly Color PanelFill = new Color32(4, 23, 32, 184);
+        private static readonly Color HeaderFill = new Color32(6, 33, 43, 224);
+        private static readonly Color ViewportFill = new Color32(3, 18, 25, 158);
+        private static readonly Color ButtonFill = new Color32(9, 43, 56, 220);
+        private static readonly Color ButtonHover = new Color32(31, 97, 122, 235);
+        private static readonly Color ButtonPressed = new Color32(8, 171, 219, 242);
+        private static readonly Color ButtonDisabled = new Color32(8, 31, 40, 145);
+        private static readonly Color ToggleOnFill = new Color32(18, 78, 96, 230);
+        private static readonly Color CyanAccent = new Color32(8, 171, 219, 242);
+        private static readonly Color TitleCyan = new Color32(143, 224, 255, 255);
+        private static readonly Color HintCyan = new Color32(143, 199, 224, 255);
         private static readonly Dictionary<PvpPanelTab, GameObject> Pages = new Dictionary<PvpPanelTab, GameObject>();
         private static readonly Dictionary<PvpPanelTab, Button> TabButtons = new Dictionary<PvpPanelTab, Button>();
         private static PvpPanelTab _tab = PvpPanelTab.Status;
@@ -58,8 +79,11 @@ namespace ErenshorPvP
         private static float _panelNormY = PvpUiGeometry.Unset;
         private static float _launcherNormX = PvpUiGeometry.Unset;
         private static float _launcherNormY = PvpUiGeometry.Unset;
+        private static double _lastActivatedAt;
 
         internal static bool IsBuilt { get { return _built; } }
+        internal static int CanvasSortOrder { get { return SortingOrder; } }
+        internal static double LastActivatedAt { get { return _lastActivatedAt; } }
 
         internal static void ConfigurePosition(float panelX, float panelY, float launcherX, float launcherY,
             Action<float, float> persistPanel, Action<float, float> persistLauncher)
@@ -74,8 +98,10 @@ namespace ErenshorPvP
 
         internal static void Tick(bool panelOpen, bool launcherVisible)
         {
+            bool wasPanelOpen = _panelOpen;
             _panelOpen = panelOpen;
             _launcherVisible = launcherVisible;
+            if (panelOpen && !wasPanelOpen) TouchActivation();
             if (!SuiteUiPolicy.IsGameplayReady())
             {
                 HideAll();
@@ -116,6 +142,7 @@ namespace ErenshorPvP
 
         internal static void ResetPosition()
         {
+            PvpDragGuard.ForceReleaseIfOwned();
             _panelNormX = PvpUiGeometry.Unset;
             _panelNormY = PvpUiGeometry.Unset;
             if (_built) ApplyPanelPosition(false);
@@ -124,6 +151,7 @@ namespace ErenshorPvP
 
         internal static void ResetLauncherPosition()
         {
+            PvpDragGuard.ForceReleaseIfOwned();
             _launcherNormX = PvpUiGeometry.Unset;
             _launcherNormY = PvpUiGeometry.Unset;
             if (_built) ApplyLauncherPosition(false);
@@ -158,6 +186,9 @@ namespace ErenshorPvP
             _titleText = null; _statusText = null; _resultText = null; _pendingText = null;
             _fightText = null; _rulesText = null; _scoreText = null; _debugText = null;
             _acceptButton = null; _refuseButton = null; _fleeButton = null; _ambushHereButton = null; _debugTabButton = null;
+            _enabledButton = null; _arrangedButton = null; _ambushButton = null;
+            _toggleVisualInitialized = false;
+            _lastActivatedAt = 0d;
             _built = false; _panelOpen = false; _launcherVisible = false; _fleeConfirm = false;
         }
 
@@ -165,9 +196,12 @@ namespace ErenshorPvP
         {
             string a = PvpUiGeometry.RunSelfTests();
             string b = SuiteLauncherPolicy.RunSelfTests();
-            return a.StartsWith("PASS", StringComparison.Ordinal) && b.StartsWith("PASS", StringComparison.Ordinal)
-                ? "PASS:pvp_retained_ui_geometry_launcher_policy"
-                : "FAIL:" + a + ";" + b;
+            string c = PvpUiPresentation.RunSelfTests();
+            return a.StartsWith("PASS", StringComparison.Ordinal) &&
+                   b.StartsWith("PASS", StringComparison.Ordinal) &&
+                   c.StartsWith("PASS", StringComparison.Ordinal)
+                ? "PASS:pvp_retained_ui_geometry_launcher_presentation_policy"
+                : "FAIL:" + a + ";" + b + ";" + c;
         }
 
         private static bool EnsureBuilt()
@@ -207,7 +241,7 @@ namespace ErenshorPvP
 
         private static void BuildLauncher()
         {
-            _launcherObject = CreatePanelObject("PvP Launcher", _root.transform, new Color32(23, 27, 34, 238));
+            _launcherObject = CreatePanelObject("PvP Launcher", _root.transform, PanelFill);
             _launcher = _launcherObject.GetComponent<RectTransform>();
             _launcher.sizeDelta = new Vector2(LauncherWidth, LauncherHeight);
             _launcher.anchorMin = _launcher.anchorMax = new Vector2(0f, 0f);
@@ -215,7 +249,7 @@ namespace ErenshorPvP
 
             RectTransform grip = CreateRect("Grip", _launcher, new Vector2(18f, LauncherHeight), new Vector2(0f, 0f));
             Image gripImage = grip.gameObject.AddComponent<Image>();
-            gripImage.color = new Color32(61, 71, 84, 255);
+            gripImage.color = CyanAccent;
             PvpDragGuard drag = grip.gameObject.AddComponent<PvpDragGuard>();
             drag.Target = _launcher;
             drag.OnDragCompleted = PersistLauncherPosition;
@@ -228,7 +262,7 @@ namespace ErenshorPvP
 
         private static void BuildPanel()
         {
-            _panelObject = CreatePanelObject("PvP Panel", _root.transform, new Color32(18, 22, 29, 246));
+            _panelObject = CreatePanelObject("PvP Panel", _root.transform, PanelFill);
             _panel = _panelObject.GetComponent<RectTransform>();
             _panel.sizeDelta = new Vector2(PanelWidth, PanelHeight);
             _panel.anchorMin = _panel.anchorMax = new Vector2(0f, 0f);
@@ -236,15 +270,16 @@ namespace ErenshorPvP
 
             _header = CreateRect("Header", _panel, new Vector2(PanelWidth, HeaderHeight), new Vector2(0f, PanelHeight - HeaderHeight));
             Image headerImage = _header.gameObject.AddComponent<Image>();
-            headerImage.color = new Color32(39, 47, 58, 255);
+            headerImage.color = HeaderFill;
             _headerGrip = CreateRect("Header Drag Surface", _header, new Vector2(PanelWidth - 46f, HeaderHeight), Vector2.zero);
             Image headerGripRaycast = _headerGrip.gameObject.AddComponent<Image>();
             headerGripRaycast.color = new Color(0f, 0f, 0f, 0f);
-            _titleText = AddText(_headerGrip, "ERENSHOR PvP", 17, TextAlignmentOptions.MidlineLeft, Color.white);
+            _titleText = AddText(_headerGrip, "ERENSHOR PvP", 17, TextAlignmentOptions.MidlineLeft, TitleCyan);
             SetOffsets(_titleText.rectTransform, 10f, 0f, 0f, 0f);
             PvpDragGuard panelDrag = _headerGrip.gameObject.AddComponent<PvpDragGuard>();
             panelDrag.Target = _panel;
             panelDrag.OnDragCompleted = PersistPanelPosition;
+            panelDrag.OnPointerActivated = TouchActivation;
 
             _closeRect = CreateRect("Close", _header, new Vector2(36f, HeaderHeight - 6f), new Vector2(PanelWidth - 40f, 3f));
             AddButton(_closeRect, "X", delegate { PvpControlApi.ClosePanel(); });
@@ -260,7 +295,7 @@ namespace ErenshorPvP
             float viewportH = PanelHeight - HeaderHeight - TabHeight - 58f;
             _viewport = CreateRect("Viewport", _panel, new Vector2(PanelWidth - 16f, viewportH), new Vector2(8f, viewportY));
             Image viewportImage = _viewport.gameObject.AddComponent<Image>();
-            viewportImage.color = new Color32(12, 15, 20, 150);
+            viewportImage.color = ViewportFill;
             _viewport.gameObject.AddComponent<RectMask2D>();
             ScrollRect scroll = _viewport.gameObject.AddComponent<ScrollRect>();
             scroll.horizontal = false; scroll.vertical = true; scroll.scrollSensitivity = 22f;
@@ -281,7 +316,7 @@ namespace ErenshorPvP
             BuildDebugPage(_content);
 
             _footer = CreateRect("Footer", _panel, new Vector2(PanelWidth - 16f, 34f), new Vector2(8f, 8f));
-            _resultText = AddText(_footer, string.Empty, 12, TextAlignmentOptions.MidlineLeft, new Color32(180, 190, 204, 255));
+            _resultText = AddText(_footer, string.Empty, 12, TextAlignmentOptions.MidlineLeft, HintCyan);
         }
 
         private static void BuildStatusPage(RectTransform parent)
@@ -289,9 +324,12 @@ namespace ErenshorPvP
             RectTransform page = CreatePage(parent, PvpPanelTab.Status);
             AddSectionHeader(page, "STATUS / SAFETY");
             _statusText = AddLayoutText(page, string.Empty, 14, 126f);
-            AddLayoutButton(page, "Toggle PvP Enabled", delegate { PvpControlApi.SetEnabled(!PvpController.Enabled); });
-            AddLayoutButton(page, "Toggle Arranged Challenges", delegate { PvpControlApi.SetArrangedEnabled(!PvpController.ArrangedEnabled); });
-            AddLayoutButton(page, "Toggle Wild Ambushes", delegate { PvpControlApi.SetAmbushEnabled(!PvpController.AmbushEnabled); });
+            _enabledButton = AddLayoutButton(page, PvpUiPresentation.ToggleLabel("PvP Enabled", PvpController.Enabled),
+                delegate { PvpControlApi.SetEnabled(!PvpController.Enabled); });
+            _arrangedButton = AddLayoutButton(page, PvpUiPresentation.ToggleLabel("Arranged Challenges", PvpController.ArrangedEnabled),
+                delegate { PvpControlApi.SetArrangedEnabled(!PvpController.ArrangedEnabled); });
+            _ambushButton = AddLayoutButton(page, PvpUiPresentation.ToggleLabel("Wild Ambushes", PvpController.AmbushEnabled),
+                delegate { PvpControlApi.SetAmbushEnabled(!PvpController.AmbushEnabled); });
             _ambushHereButton = AddLayoutButton(page, "Allow ambushes here", delegate
             {
                 string result = PvpControlApi.SetAmbushHere(!PvpController.AmbushZoneListedHere);
@@ -365,6 +403,28 @@ namespace ErenshorPvP
                     "Zone safety: " + (PvpController.IsProtectedHere ? "PROTECTED" : "PvP eligible") + "\n" +
                     "Level range: +/-" + PvpController.LevelRangeHere;
             }
+            bool enabled = PvpController.Enabled;
+            bool arranged = PvpController.ArrangedEnabled;
+            bool ambush = PvpController.AmbushEnabled;
+            if (_enabledButton != null)
+            {
+                SetButtonText(_enabledButton, PvpUiPresentation.ToggleLabel("PvP Enabled", enabled));
+                if (!_toggleVisualInitialized || _lastEnabledVisual != enabled) SetToggleButtonState(_enabledButton, enabled);
+            }
+            if (_arrangedButton != null)
+            {
+                SetButtonText(_arrangedButton, PvpUiPresentation.ToggleLabel("Arranged Challenges", arranged));
+                if (!_toggleVisualInitialized || _lastArrangedVisual != arranged) SetToggleButtonState(_arrangedButton, arranged);
+            }
+            if (_ambushButton != null)
+            {
+                SetButtonText(_ambushButton, PvpUiPresentation.ToggleLabel("Wild Ambushes", ambush));
+                if (!_toggleVisualInitialized || _lastAmbushVisual != ambush) SetToggleButtonState(_ambushButton, ambush);
+            }
+            _lastEnabledVisual = enabled;
+            _lastArrangedVisual = arranged;
+            _lastAmbushVisual = ambush;
+            _toggleVisualInitialized = true;
             if (_ambushHereButton != null) SetButtonText(_ambushHereButton, PvpController.AmbushZoneListedHere ? "Stop ambushes here" : "Allow ambushes here");
             bool pending = PvpController.HasPending;
             if (_pendingText != null)
@@ -437,8 +497,17 @@ namespace ErenshorPvP
 
         private static void HideAll()
         {
+            // Visibility teardown is an ownership boundary. Release before disabling children so
+            // no lost pointer-up/scene transition can leave Erenshor's camera drag flag stuck.
+            PvpDragGuard.ForceReleaseIfOwned();
             if (_panelObject != null) _panelObject.SetActive(false);
             if (_launcherObject != null) _launcherObject.SetActive(false);
+        }
+
+        private static void TouchActivation()
+        {
+            try { _lastActivatedAt = Time.realtimeSinceStartup; }
+            catch { _lastActivatedAt = 0d; }
         }
 
         private static void ClampAndApplyPositions(bool persist)
@@ -550,7 +619,7 @@ namespace ErenshorPvP
         private static void AddSectionHeader(RectTransform parent, string text)
         {
             TextMeshProUGUI t = AddLayoutText(parent, text, 13, 26f);
-            t.color = new Color32(132, 176, 220, 255);
+            t.color = TitleCyan;
             t.fontStyle = FontStyles.Bold;
         }
 
@@ -558,7 +627,7 @@ namespace ErenshorPvP
         {
             GameObject go = new GameObject("Text", typeof(RectTransform), typeof(TextMeshProUGUI), typeof(LayoutElement));
             RectTransform rt = go.GetComponent<RectTransform>(); rt.SetParent(parent, false);
-            TextMeshProUGUI tmp = go.GetComponent<TextMeshProUGUI>(); tmp.text = text; tmp.fontSize = size; tmp.color = new Color32(222, 226, 232, 255); tmp.alignment = TextAlignmentOptions.TopLeft; tmp.enableWordWrapping = true; tmp.raycastTarget = false;
+            TextMeshProUGUI tmp = go.GetComponent<TextMeshProUGUI>(); tmp.text = text; tmp.fontSize = size; tmp.color = new Color32(224, 238, 244, 255); tmp.alignment = TextAlignmentOptions.TopLeft; tmp.enableWordWrapping = true; tmp.raycastTarget = false;
             LayoutElement le = go.GetComponent<LayoutElement>(); le.preferredHeight = preferredHeight;
             return tmp;
         }
@@ -568,7 +637,9 @@ namespace ErenshorPvP
             GameObject go = new GameObject(label, typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
             RectTransform rt = go.GetComponent<RectTransform>(); rt.SetParent(parent, false);
             LayoutElement le = go.GetComponent<LayoutElement>(); le.preferredHeight = 32f;
-            Button b = go.GetComponent<Button>(); b.targetGraphic = go.GetComponent<Image>(); b.targetGraphic.color = new Color32(53, 66, 82, 255); b.onClick.AddListener(callback);
+            Button b = go.GetComponent<Button>(); b.targetGraphic = go.GetComponent<Image>();
+            b.onClick.AddListener(delegate { TouchActivation(); if (callback != null) callback(); });
+            ApplyButtonStyle(b);
             AddText(rt, label, 13, TextAlignmentOptions.Center, Color.white);
             return b;
         }
@@ -593,7 +664,7 @@ namespace ErenshorPvP
         {
             RectTransform row = AddButtonRow(parent);
             RectTransform labelRt = CreateFillCell(row, 0, 2);
-            AddText(labelRt, label, 13, TextAlignmentOptions.MidlineLeft, new Color32(210, 216, 224, 255));
+            AddText(labelRt, label, 13, TextAlignmentOptions.MidlineLeft, HintCyan);
             RectTransform controls = CreateFillCell(row, 1, 2);
             AddButton(CreateFillCell(controls, 0, 2), "−", minus);
             AddButton(CreateFillCell(controls, 1, 2), "+", plus);
@@ -601,8 +672,10 @@ namespace ErenshorPvP
 
         private static Button AddButton(RectTransform rt, string label, UnityEngine.Events.UnityAction callback)
         {
-            Image image = rt.gameObject.GetComponent<Image>(); if (image == null) image = rt.gameObject.AddComponent<Image>(); image.color = new Color32(53, 66, 82, 255);
-            Button b = rt.gameObject.GetComponent<Button>(); if (b == null) b = rt.gameObject.AddComponent<Button>(); b.targetGraphic = image; b.onClick.AddListener(callback);
+            Image image = rt.gameObject.GetComponent<Image>(); if (image == null) image = rt.gameObject.AddComponent<Image>();
+            Button b = rt.gameObject.GetComponent<Button>(); if (b == null) b = rt.gameObject.AddComponent<Button>(); b.targetGraphic = image;
+            b.onClick.AddListener(delegate { TouchActivation(); if (callback != null) callback(); });
+            ApplyButtonStyle(b);
             AddText(rt, label, 13, TextAlignmentOptions.Center, Color.white);
             return b;
         }
@@ -618,6 +691,36 @@ namespace ErenshorPvP
         private static void SetOffsets(RectTransform rt, float left, float bottom, float right, float top)
         {
             rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one; rt.offsetMin = new Vector2(left, bottom); rt.offsetMax = new Vector2(right, top);
+        }
+
+        private static void ApplyButtonStyle(Button button)
+        {
+            if (button == null || button.targetGraphic == null) return;
+            button.targetGraphic.color = Color.white;
+            ColorBlock colors = button.colors;
+            colors.normalColor = ButtonFill;
+            colors.highlightedColor = ButtonHover;
+            colors.pressedColor = ButtonPressed;
+            colors.selectedColor = ButtonHover;
+            colors.disabledColor = ButtonDisabled;
+            colors.colorMultiplier = 1f;
+            colors.fadeDuration = 0.08f;
+            button.colors = colors;
+            button.targetGraphic.CrossFadeColor(ButtonFill, 0f, true, true);
+        }
+
+        private static void SetToggleButtonState(Button button, bool enabled)
+        {
+            if (button == null || button.targetGraphic == null) return;
+            Color normal = enabled ? ToggleOnFill : ButtonFill;
+            ColorBlock colors = button.colors;
+            colors.normalColor = normal;
+            colors.highlightedColor = ButtonHover;
+            colors.pressedColor = ButtonPressed;
+            colors.selectedColor = ButtonHover;
+            colors.disabledColor = ButtonDisabled;
+            button.colors = colors;
+            if (button.interactable) button.targetGraphic.CrossFadeColor(normal, 0f, true, true);
         }
 
         private static void SetButtonText(Button button, string text)

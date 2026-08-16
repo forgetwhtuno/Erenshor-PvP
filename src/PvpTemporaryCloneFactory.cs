@@ -23,6 +23,12 @@ namespace ErenshorPvP
         private static readonly HashSet<int> EquipmentVisualsApplied = new HashSet<int>();
         private static readonly HashSet<int> ClassLoadoutsApplied = new HashSet<int>();
         private static readonly Dictionary<int, int> EligibleCombatSpellCounts = new Dictionary<int, int>();
+        private static readonly Dictionary<int, int> EligibleHealSpellCounts = new Dictionary<int, int>();
+        private static readonly Dictionary<int, int> AttackDecisionCounts = new Dictionary<int, int>();
+        private static readonly Dictionary<int, int> HealCheckCounts = new Dictionary<int, int>();
+        private static readonly Dictionary<int, int> SpellStartCounts = new Dictionary<int, int>();
+        private static readonly Dictionary<int, int> LastSpellStartFrame = new Dictionary<int, int>();
+        private static readonly HashSet<int> NativeStartBypassEligible = new HashSet<int>();
         private static float _despawnAt;
         private static string _activeMatchId;
         private static PvpEncounterMode _activeMode = PvpEncounterMode.Arranged;
@@ -149,6 +155,8 @@ namespace ErenshorPvP
                 TemporaryActorIds.Add(clone.GetInstanceID());
                 TeamClones.Add(clone);
                 TeamProfiles.Add(profile);
+                if ((_templateSource ?? string.Empty).StartsWith("live:", StringComparison.OrdinalIgnoreCase))
+                    NativeStartBypassEligible.Add(clone.GetInstanceID());
                 if (_clone == null) { _clone = clone; _activeProfile = profile; }
                 _despawnAt = Time.unscaledTime + 20f;
                 ErenshorPvpEvents.Publish(new PvpSemanticEvent("pvp_proxy_spawned", _activeMatchId, proxyName,
@@ -330,11 +338,17 @@ namespace ErenshorPvP
                 EquipmentVisualsApplied.Remove(member.GetInstanceID());
                 ClassLoadoutsApplied.Remove(member.GetInstanceID());
                 EligibleCombatSpellCounts.Remove(member.GetInstanceID());
+                EligibleHealSpellCounts.Remove(member.GetInstanceID());
+                AttackDecisionCounts.Remove(member.GetInstanceID());
+                HealCheckCounts.Remove(member.GetInstanceID());
+                SpellStartCounts.Remove(member.GetInstanceID());
+                NativeStartBypassEligible.Remove(member.GetInstanceID());
                 try { UnityEngine.Object.Destroy(member); } catch { }
             }
-            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); DestroyTemporarySpells();
+            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); EligibleHealSpellCounts.Clear(); AttackDecisionCounts.Clear(); HealCheckCounts.Clear(); SpellStartCounts.Clear(); LastSpellStartFrame.Clear(); NativeStartBypassEligible.Clear(); DestroyTemporarySpells();
             ErenshorPvpEvents.Publish(new PvpSemanticEvent("pvp_proxy_despawned", string.Empty, "PvP Proxy",
                 string.Empty, "cleanup", reason ?? "manual"));
+            PvpController.EncounterCleaned();
             return "[Erenshor PvP] Temporary clone removed (" + (reason ?? "manual") + ").";
         }
 
@@ -376,6 +390,151 @@ namespace ErenshorPvP
             catch (Exception ex) { Debug.LogWarning("[Erenshor PvP] reward_suppression_failed=" + ex.GetType().Name); }
         }
 
+        internal static bool ValidateProxyStartupInvariant(GameObject go, out string reason)
+        {
+            reason = string.Empty;
+            if (go == null) { reason = "missing_root"; return false; }
+            NPC npc = go.GetComponent<NPC>();
+            Character actor = go.GetComponent<Character>();
+            Stats stats = actor == null ? null : actor.MyStats;
+            CastSpell caster = go.GetComponent<CastSpell>();
+            NavMeshAgent nav = go.GetComponent<NavMeshAgent>();
+            SimPlayer sim = go.GetComponent<SimPlayer>();
+            bool actorLinksNpc = false, statsLinksActor = false;
+            try { actorLinksNpc = actor != null && actor.MyNPC == npc; } catch { }
+            try { statsLinksActor = stats != null && stats.Myself == actor; } catch { }
+            bool persistent = false;
+            try { persistent = (sim != null && (sim.enabled || sim.MySimTracking != null || sim.myIndex >= 0)) || (npc != null && (npc.SimPlayer || npc.ThisSim != null)); } catch { persistent = true; }
+            bool pass = PvpProxyStartupPolicy.InvariantPasses(TeamClones.Contains(go), npc != null, actor != null, stats != null,
+                actorLinksNpc, statsLinksActor, caster != null, nav != null, persistent);
+            if (!pass)
+            {
+                reason = "registered=" + TeamClones.Contains(go) + ",npc=" + (npc != null) + ",character=" + (actor != null) +
+                    ",stats=" + (stats != null) + ",actorNpc=" + actorLinksNpc + ",statsActor=" + statsLinksActor +
+                    ",caster=" + (caster != null) + ",nav=" + (nav != null) + ",persistent=" + persistent;
+            }
+            return pass;
+        }
+
+        internal static bool AllowNativeNpcStart(NPC npc, out bool temporaryNativeStartExpected)
+        {
+            temporaryNativeStartExpected = false;
+            if (!IsTemporaryNpc(npc)) return true;
+            string reason;
+            bool ready = ValidateProxyStartupInvariant(npc == null ? null : npc.gameObject, out reason);
+            int id = npc == null || npc.gameObject == null ? 0 : npc.gameObject.GetInstanceID();
+            bool liveStartedClone = id != 0 && NativeStartBypassEligible.Contains(id);
+            bool runNative = PvpProxyStartupPolicy.ShouldRunNativeNpcStart(true, liveStartedClone);
+            temporaryNativeStartExpected = runNative;
+            PvpDiagnostics.Log("proxy_native_start action=" + (runNative ? "native_pending" : "bypass") +
+                "; proxy=" + SafeProxyName(npc) + "; invariant=" + (ready ? "pass" : "fail:" + reason) +
+                "; template=" + _templateSource + "; source_started=" + liveStartedClone);
+            // Only live-scene source NPCs are known to have already completed their native startup
+            // before cloning. Replaying that borrowed lifecycle after conversion to a PvP identity
+            // caused the observed NPC.Start failure and can restore source state. Resource-prefab
+            // clones retain native Start until their lifecycle is proven separately.
+            return runNative;
+        }
+
+        internal static void ObserveNativeNpcStartCompleted(NPC npc, bool temporaryNativeStartExpected)
+        {
+            if (!temporaryNativeStartExpected || !IsTemporaryNpc(npc)) return;
+            PvpDiagnostics.Log("proxy_native_start action=native; completion=completed; proxy=" + SafeProxyName(npc) +
+                "; template=" + _templateSource);
+        }
+
+        internal static bool ValidateProxyRewardBoundary(GameObject go, out string reason)
+        {
+            reason = string.Empty;
+            Character actor = go == null ? null : go.GetComponent<Character>();
+            if (actor == null) { reason = "missing_character"; return false; }
+            int xp;
+            bool xpReadableAndZero = TryReadIntField(actor, "xp", out xp) && xp == 0;
+            bool bossXpZero = false, bonusXpZero = false, questNull = false, factionEmpty = false;
+            try
+            {
+                bossXpZero = actor.BossXp == 0f;
+                bonusXpZero = actor.BonusRangeXP == Vector2.zero;
+                questNull = actor.QuestCompleteOnDeath == null;
+                factionEmpty = actor.factionMods == null || actor.factionMods.Length == 0;
+            }
+            catch { }
+            LootTable loot = go.GetComponent<LootTable>();
+            bool lootGoldZero = loot == null || (loot.MinGold == 0 && loot.MaxGold == 0 && loot.MyGold == 0);
+            bool lootDisabled = loot == null || !loot.enabled;
+            bool pass = PvpProxyStartupPolicy.RewardBoundaryPasses(xpReadableAndZero, bossXpZero, bonusXpZero,
+                questNull, factionEmpty, lootGoldZero, lootDisabled);
+            if (!pass)
+                reason = "xp=" + (xpReadableAndZero ? "0" : "unreadable_or_nonzero") + ",bossXp=" + bossXpZero +
+                    ",bonusXp=" + bonusXpZero + ",questNull=" + questNull + ",factionEmpty=" + factionEmpty +
+                    ",lootGoldZero=" + lootGoldZero + ",lootDisabled=" + lootDisabled;
+            return pass;
+        }
+
+        internal static void ObserveAttackDecision(NPC npc)
+        {
+            if (!IsTemporaryNpc(npc)) return; Increment(AttackDecisionCounts, npc.gameObject.GetInstanceID());
+        }
+
+        internal static void ObserveHealCheck(NPC npc)
+        {
+            if (!IsTemporaryNpc(npc)) return; Increment(HealCheckCounts, npc.gameObject.GetInstanceID());
+        }
+
+        internal static void ObserveSpellStart(CastSpell caster, Spell spell)
+        {
+            Character actor = null;
+            try { actor = caster == null ? null : caster.MyChar; } catch { }
+            if (!IsTemporaryActor(actor)) return;
+            int actorId = actor.gameObject.GetInstanceID();
+            int spellId = spell == null ? 0 : spell.GetHashCode();
+            int key = unchecked((actorId * 397) ^ spellId);
+            int frame = Time.frameCount, previous;
+            if (LastSpellStartFrame.TryGetValue(key, out previous) && previous == frame) return;
+            LastSpellStartFrame[key] = frame;
+            Increment(SpellStartCounts, actorId);
+        }
+
+        private static void Increment(Dictionary<int, int> map, int id)
+        {
+            int value; map.TryGetValue(id, out value); map[id] = value + 1;
+        }
+
+        private static string SafeProxyName(NPC npc)
+        {
+            try { return npc == null ? "null" : (string.IsNullOrWhiteSpace(npc.NPCName) ? npc.gameObject.name : npc.NPCName); }
+            catch { return "unknown"; }
+        }
+
+        internal static string BalanceRuntimeSummary()
+        {
+            int healCapable = 0, healChecks = 0, attackDecisions = 0, spellStarts = 0;
+            for (int i = 0; i < TeamClones.Count; i++)
+            {
+                GameObject go = TeamClones[i]; if (go == null) continue; int id = go.GetInstanceID();
+                int value;
+                if (EligibleHealSpellCounts.TryGetValue(id, out value) && value > 0) healCapable++;
+                if (HealCheckCounts.TryGetValue(id, out value)) healChecks += value;
+                if (AttackDecisionCounts.TryGetValue(id, out value)) attackDecisions += value;
+                if (SpellStartCounts.TryGetValue(id, out value)) spellStarts += value;
+            }
+            return "heal_capable_attackers=" + healCapable + "; heal_checks=" + healChecks +
+                "; attack_spell_decisions=" + attackDecisions + "; spell_starts=" + spellStarts;
+        }
+
+        internal static string BalanceHealingAssessment(long healingDone)
+        {
+            int healCapable = 0, healChecks = 0, spellStarts = 0;
+            for (int i = 0; i < TeamClones.Count; i++)
+            {
+                GameObject go = TeamClones[i]; if (go == null) continue; int id = go.GetInstanceID(); int value;
+                if (EligibleHealSpellCounts.TryGetValue(id, out value) && value > 0) healCapable++;
+                if (HealCheckCounts.TryGetValue(id, out value)) healChecks += value;
+                if (SpellStartCounts.TryGetValue(id, out value)) spellStarts += value;
+            }
+            return PvpProxyStartupPolicy.ZeroHealingAssessment(healCapable, healChecks, spellStarts, healingDone);
+        }
+
         internal static string BeginTargetingTest()
         {
             if (_clone == null) return "[Erenshor PvP] Spawn a temporary clone first: /epvp spawnclone";
@@ -385,9 +544,25 @@ namespace ErenshorPvP
         internal static string BeginLethalFight()
         {
             if (_clone == null) return "[Erenshor PvP] Spawn a temporary proxy first: /epvp spawnclone";
-            // NPC.Start runs on the first Unity frame after Instantiate and can restore the
-            // borrowed creature's stats/spell state. Reassert the PvP profile at the actual
-            // combat boundary so the native AI receives the intended class loadout.
+            // Registered synthetic proxies bypass borrowed NPC.Start. Validate the component graph
+            // before enabling combat, then reassert the PvP-owned class/runtime state.
+            for (int i = 0; i < TeamClones.Count; i++)
+            {
+                string invariant;
+                if (!ValidateProxyStartupInvariant(TeamClones[i], out invariant))
+                {
+                    PvpDiagnostics.Log("combat_start_blocked proxy=" + (i + 1) + "; startup_invariant=" + invariant);
+                    return "[Erenshor PvP] Lethal fight blocked: proxy " + (i + 1) + " native component graph is incomplete.";
+                }
+                Character rewardActor = TeamClones[i] == null ? null : TeamClones[i].GetComponent<Character>();
+                SuppressBorrowedDeathRewards(rewardActor);
+                string rewardInvariant;
+                if (!ValidateProxyRewardBoundary(TeamClones[i], out rewardInvariant))
+                {
+                    PvpDiagnostics.Log("combat_start_blocked proxy=" + (i + 1) + "; reward_invariant=" + rewardInvariant);
+                    return "[Erenshor PvP] Lethal fight blocked: proxy " + (i + 1) + " borrowed reward state could not be suppressed.";
+                }
+            }
             RefreshCombatRuntime();
             List<NPC> npcs = new List<NPC>(); List<Character> actors = new List<Character>(); List<CastSpell> spells = new List<CastSpell>();
             foreach (GameObject member in TeamClones)
@@ -544,6 +719,13 @@ namespace ErenshorPvP
 
         internal static void DespawnAfterFight(string reason, Character winner)
         {
+            // Containment can observe several terminal native callbacks in the same frame. Once
+            // the owned proxy collections are empty and the primary clone is gone, cleanup has
+            // already completed and must not publish/log a second terminal cleanup.
+            if (TeamClones.Count == 0 && _clone == null) return;
+            // Keep this terminal path independently safe for callers outside containment.Tick.
+            // End is idempotent and clears native aggro, defender-pet targets, and navigation.
+            PvpCombatContainment.End(reason);
             GameObject clone = _clone;
             string opponent = _activeProfile == null ? "PvP Proxy" : _activeProfile.Name;
             List<PvpOpponentProfile> completedProfiles = new List<PvpOpponentProfile>(TeamProfiles.Where(x => x != null));
@@ -567,9 +749,14 @@ namespace ErenshorPvP
                 EquipmentVisualsApplied.Remove(member.GetInstanceID());
                 ClassLoadoutsApplied.Remove(member.GetInstanceID());
                 EligibleCombatSpellCounts.Remove(member.GetInstanceID());
+                EligibleHealSpellCounts.Remove(member.GetInstanceID());
+                AttackDecisionCounts.Remove(member.GetInstanceID());
+                HealCheckCounts.Remove(member.GetInstanceID());
+                SpellStartCounts.Remove(member.GetInstanceID());
+                NativeStartBypassEligible.Remove(member.GetInstanceID());
                 try { UnityEngine.Object.Destroy(member); } catch { }
             }
-            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); DestroyTemporarySpells();
+            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); EligibleHealSpellCounts.Clear(); AttackDecisionCounts.Clear(); HealCheckCounts.Clear(); SpellStartCounts.Clear(); LastSpellStartFrame.Clear(); NativeStartBypassEligible.Clear(); DestroyTemporarySpells();
             PvpDiagnostics.Log("validation_cleanup match=" + ShortMatch(completedMatchId) +
                 "; proxy_collections=" + TeamClones.Count + "; profile_collections=" + TeamProfiles.Count +
                 "; spell_collections=" + TemporarySpells.Count + "; destroy_scheduled=" + proxyCount);
@@ -589,15 +776,30 @@ namespace ErenshorPvP
             catch { }
             if (winner != null && string.Equals(reason, "proxy_death", StringComparison.Ordinal))
             {
-                string result = PvpRewardService.GrantVictory(winner, completedProfiles);
+                string result = PvpRewardService.GrantVictory(completedMatchId, winner, completedProfiles);
                 PvpDiagnostics.Log("reward_result match=" + ShortMatch(completedMatchId) + "; " + result.Replace("[Erenshor PvP] ", string.Empty));
                 try { UpdateSocialLog.LogAdd(result, "lightblue"); } catch { }
             }
+            PvpController.EncounterCleaned();
         }
 
         private static string ShortMatch(string matchId)
         {
             return string.IsNullOrEmpty(matchId) ? "none" : matchId.Substring(0, Math.Min(8, matchId.Length));
+        }
+
+        private static bool TryReadIntField(object instance, string name, out int value)
+        {
+            value = 0;
+            try
+            {
+                FieldInfo field = instance == null ? null : instance.GetType().GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (field == null) return false;
+                object raw = field.GetValue(instance);
+                if (raw is int) { value = (int)raw; return true; }
+                return false;
+            }
+            catch { return false; }
         }
 
         private static void TrySetField(object instance, string name, object value)
@@ -881,6 +1083,7 @@ namespace ErenshorPvP
                     { npc.MyAttackSpells.Add(spell); categorized++; }
                 }
                 EligibleCombatSpellCounts[npc.gameObject.GetInstanceID()] = categorized;
+                EligibleHealSpellCounts[npc.gameObject.GetInstanceID()] = npc.MyHealSpells.Count;
                 CastSpell caster = npc.GetComponent<CastSpell>();
                 if (caster != null)
                 {
@@ -999,6 +1202,78 @@ namespace ErenshorPvP
         [HarmonyPrefix]
         private static bool Prefix() { return !PvpTemporaryCloneFactory.SuppressPersistentLoad; }
     }
+
+    // The borrowed native mob Start lifecycle is not valid for a registered synthetic PvP root:
+    // it has already been converted to a non-persistent, reward-suppressed proxy and prior live
+    // evidence showed Start restoring borrowed state. Scope the bypass to registered PvP roots only.
+    [HarmonyPatch(typeof(NPC), "Start")]
+    internal static class PvpTemporaryNpcStartPatch
+    {
+        [HarmonyPrefix]
+        private static bool Prefix(NPC __instance, out bool __state)
+        {
+            return PvpTemporaryCloneFactory.AllowNativeNpcStart(__instance, out __state);
+        }
+
+        [HarmonyPostfix]
+        private static void Postfix(NPC __instance, bool __state)
+        {
+            PvpTemporaryCloneFactory.ObserveNativeNpcStartCompleted(__instance, __state);
+        }
+
+        [HarmonyFinalizer]
+        private static Exception Finalizer(NPC __instance, bool __state, Exception __exception)
+        {
+            if (__state && __exception != null && PvpTemporaryCloneFactory.IsTemporaryNpc(__instance))
+                PvpDiagnostics.Log("proxy_native_start action=native; completion=failed; proxy=" +
+                    (__instance == null ? "null" : __instance.gameObject.name) + "; error=" + __exception.GetType().Name);
+            // Diagnostics only: return the original exception unchanged. Never suppress a native
+            // NPC.Start failure for resource-prefab proxies or ordinary game NPCs.
+            return __exception;
+        }
+    }
+
+    [HarmonyPatch(typeof(NPC), "DoAttackSpell")]
+    internal static class PvpAttackDecisionTelemetryPatch
+    {
+        [HarmonyPrefix]
+        private static void Prefix(NPC __instance) { PvpTemporaryCloneFactory.ObserveAttackDecision(__instance); }
+    }
+
+    [HarmonyPatch(typeof(NPC), "CheckHeals")]
+    internal static class PvpHealCheckTelemetryPatch
+    {
+        [HarmonyPrefix]
+        private static void Prefix(NPC __instance) { PvpTemporaryCloneFactory.ObserveHealCheck(__instance); }
+    }
+
+    [HarmonyPatch(typeof(NPC), "CheckHealsRaid")]
+    internal static class PvpHealRaidCheckTelemetryPatch
+    {
+        [HarmonyPrefix]
+        private static void Prefix(NPC __instance) { PvpTemporaryCloneFactory.ObserveHealCheck(__instance); }
+    }
+
+    [HarmonyPatch(typeof(CastSpell), "StartSpell", new Type[] { typeof(Spell), typeof(Stats) })]
+    internal static class PvpSpellStartTelemetry2Patch
+    { [HarmonyPrefix] private static void Prefix(CastSpell __instance, Spell __0) { PvpTemporaryCloneFactory.ObserveSpellStart(__instance, __0); } }
+    [HarmonyPatch(typeof(CastSpell), "StartSpell", new Type[] { typeof(Spell), typeof(Stats), typeof(float) })]
+    internal static class PvpSpellStartTelemetry3Patch
+    { [HarmonyPrefix] private static void Prefix(CastSpell __instance, Spell __0) { PvpTemporaryCloneFactory.ObserveSpellStart(__instance, __0); } }
+    [HarmonyPatch(typeof(CastSpell), "StartSpell", new Type[] { typeof(Spell), typeof(Stats), typeof(float), typeof(bool) })]
+    internal static class PvpSpellStartTelemetry4Patch
+    { [HarmonyPrefix] private static void Prefix(CastSpell __instance, Spell __0) { PvpTemporaryCloneFactory.ObserveSpellStart(__instance, __0); } }
+    [HarmonyPatch(typeof(CastSpell), "StartSpell", new Type[] { typeof(Spell), typeof(Stats), typeof(float), typeof(bool), typeof(float) })]
+    internal static class PvpSpellStartTelemetry5Patch
+    { [HarmonyPrefix] private static void Prefix(CastSpell __instance, Spell __0) { PvpTemporaryCloneFactory.ObserveSpellStart(__instance, __0); } }
+
+    [HarmonyPatch(typeof(CastSpell), "StartSpellFromProc", new Type[] { typeof(Spell), typeof(Stats), typeof(float), typeof(bool), typeof(float) })]
+    internal static class PvpSpellProcTelemetryPatch
+    { [HarmonyPrefix] private static void Prefix(CastSpell __instance, Spell __0) { PvpTemporaryCloneFactory.ObserveSpellStart(__instance, __0); } }
+
+    [HarmonyPatch(typeof(CastSpell), "StartSpellNoAnim", new Type[] { typeof(Spell), typeof(Stats), typeof(float) })]
+    internal static class PvpSpellNoAnimTelemetryPatch
+    { [HarmonyPrefix] private static void Prefix(CastSpell __instance, Spell __0) { PvpTemporaryCloneFactory.ObserveSpellStart(__instance, __0); } }
 
     [HarmonyPatch(typeof(Character), "DoDeath")]
     internal static class PvpTemporaryCloneDeathRewardPatch

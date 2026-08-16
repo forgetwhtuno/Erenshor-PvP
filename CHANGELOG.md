@@ -1,7 +1,34 @@
 # Changelog
 
+## 0.5.2 - Suite close contract / drag release hardening
+
+- Added the missing Suite `ui.state` Aura provider for the retained PvP panel, including actual Canvas sort order and activation time; existing `closePanel` is now a complete quick-close contract.
+- Panel/header interaction refreshes activation ordering without changing gameplay state.
+- Hardened drag cleanup by force-releasing owned pointer state before UI hide and panel/launcher position resets, in addition to the existing pointer-up, end-drag, focus/pause, close, zone, disable/destroy and unload paths.
+- Expanded pure tests for PvP `ui.state` formatting/bounds and retained existing pointer ownership acquire/release cycles.
+
+## Unreleased - proxy startup / drag ownership diagnostics
+
+- Scoped the observed `NPC.Start()` failure to registered PvP temporary combat roots cloned from an
+  already-started live scene NPC. Those live-source clones now bypass the inappropriate borrowed-NPC
+  startup replay; ordinary game NPCs remain untouched and resource-prefab proxies retain native
+  startup with pending/completed/failed diagnostics.
+- Added a fail-closed pre-lethal proxy component invariant and a reasserted reward invariant covering
+  private kill-XP readability/zeroing, boss/bonus XP, quest completion, faction changes, and loot
+  gold/enablement. Existing death-time suppression and configured PvP reward authority remain in place.
+- Added attack-spell decision, heal-check, and CastSpell-start telemetry so a zero-healing match can be
+  classified as no heal-capable loadout, heal AI not evaluated, no cast started, or no effective heal.
+  No balance values were changed from the single supplied 5v5 observation.
+- Retained-uGUI drag ownership now begins on left pointer-down (before Unity's drag threshold), is
+  reasserted only while PvP owns the gesture, restores a pre-existing native drag flag, and fails safe
+  on lost pointer, focus/pause, disable, destroy, panel close, zoning, and unload.
+- Repeated terminal callbacks after proxy collections are already empty no longer publish/log a second
+  fight cleanup. Added pure tests for proxy startup/reward policy and pointer acquire/release cycles.
+
 ## Unreleased - retained uGUI / Suite control migration
 
+- Aligned the retained launcher/panel with the proven Sim Actions dark/translucent/cyan visual language; the three consent switches now render their live state explicitly as `PvP Enabled [ON/OFF]`, `Arranged Challenges [ON/OFF]`, and `Wild Ambushes [ON/OFF]`.
+- Removed legacy F10 panel polling. Normal access remains the retained launcher or optional Suite Hub, with `/epvp` retained as command recovery/debug access. Combat, matchmaking, rewards, ambush cadence, acceptance/refusal, spawn clearance, and cleanup were not changed.
 - Replaced the production PvP IMGUI launcher/window with one persistent retained-uGUI canvas (`Canvas`/`CanvasScaler`/`GraphicRaycaster`, TMP, Buttons, ScrollRect/layout). Removed the PvP UI `PlayerControl.LeftClick` and `csMouseOrbit` Harmony workarounds; production UI no longer uses `OnGUI`, `GUI.Window`, `GUI.DragWindow`, native `DragUI`, or `EditUIMode`.
 - Added mod-owned EventSystem drag guards for the launcher grip and panel header. Owned drag sets `GameData.DraggingUIElement`, releases on drag end/pointer-up/disable/destroy/zoning/unload, persists normalized position once per completed gesture, and reclamps on resolution changes.
 - Added the dedicated STATUS/FIGHT/RULES/SCORE/optional DEBUG retained panel. Ordinary controls route through `PvpControlApi`; Flee requires a second confirmation click. Development spawn/despawn probes remain command-only. Matchmaking, proxy spawning, lethal combat, containment, reward, result, persistence, and opt-in semantics were not redesigned.
