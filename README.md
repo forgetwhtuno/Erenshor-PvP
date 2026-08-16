@@ -1,5 +1,7 @@
 # Erenshor PvP
 
+Part of the **Forgotten Roads for Erenshor** mod collection.
+
 Standalone MMO-style PvP encounters for Erenshor. Practice Duels remains friendly, consensual, and non-lethal for Sims already in the zone. Erenshor PvP selects off-map Sim profiles and runs lethal encounters with normal player death and respawn. World PvP contains both consensual arranged matches and rare non-consensual wild ambushes.
 
 Current development line: 0.5.2. Remaining work is tracked in [docs/PVP_TODO.md](docs/PVP_TODO.md); the most important remaining gate is live in-game validation of native combat, visuals, rewards, and the retained-uGUI panel.
@@ -157,7 +159,7 @@ This is an unofficial, community-made mod for Erenshor and is not affiliated wit
 
 ## Optional Suite Hub integration
 
-Erenshor Suite Hub is **optional**. This mod exposes a versioned, primitive-only `PvpControlApi`/Aura surface and never references the Hub assembly. Hub can display the deliberately concise status (`Enabled | Idle` / `Enabled | Match active`), change the established safe basic toggles (`PvP Enabled`, `Show PvP launcher`, arranged challenges, wild ambushes), and invoke the conventional `openPanel`/close/reset actions.
+Forgotten Roads Hub is **optional**. This mod exposes a versioned, primitive-only `PvpControlApi`/Aura surface and never references the Hub assembly. The Hub can display the deliberately concise status (`Enabled | Idle` / `Enabled | Match active`), change the established safe basic toggles (`PvP Enabled`, `Show PvP launcher`, arranged challenges, wild ambushes), and invoke the conventional `openPanel`/close/reset actions.
 
 The dedicated retained-uGUI panel remains fully usable without Hub. Launcher fallback is fail-open for access: when Hub is absent/unusable or this module's own Aura registration failed, the launcher is forced visible regardless of the saved preference. When Hub and the bridge are both usable, the preference is obeyed.
 
