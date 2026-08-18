@@ -65,8 +65,10 @@ namespace ErenshorPvP
                 if (npc.NeverAggro) failures.Add("enemy" + (i + 1) + "_neverAggro");
                 if (npc.CurrentAggroTarget == null || !IsPermittedProxyTarget(npc.CurrentAggroTarget)) failures.Add("enemy" + (i + 1) + "_target");
             }
-            return failures.Count == 0 ? "COMBAT VERIFY PASS attackers=" + EnemyActors.Count + "; defenders=" + Defenders.Count + "; defender_pets=" + DefenderPets.Count + "; damage_to_attackers=" + _damageToAttackers + "; pet_damage=" + _petDamageToAttackers + "; healing_to_attackers=" + _healingToAttackers + "; damage_to_defenders=" + _damageToDefenders + "; healing_to_defenders=" + _healingToDefenders + "; " + PvpTemporaryCloneFactory.NativeCombatEvidenceSummary() + "; targets=world_native." :
-                "COMBAT VERIFY FAIL " + string.Join(",", failures.ToArray()) + ".";
+            return failures.Count == 0 ? "COMBAT VERIFY PASS attackers=" + EnemyActors.Count + "; defenders=" + Defenders.Count + "; defender_pets=" + DefenderPets.Count + "; damage_to_attackers=" + _damageToAttackers + "; pet_damage=" + _petDamageToAttackers + "; healing_to_attackers=" + _healingToAttackers + "; damage_to_defenders=" + _damageToDefenders + "; healing_to_defenders=" + _healingToDefenders + "; " + PvpTemporaryCloneFactory.NativeCombatEvidenceSummary() + "; " +
+                PvpTemporaryCloneFactory.NativeNavHealthSummary() + "; targets=world_native." :
+                "COMBAT VERIFY FAIL " + string.Join(",", failures.ToArray()) + "; " +
+                PvpTemporaryCloneFactory.NativeNavHealthSummary() + ".";
         }
 
         internal static string BeginTargetingTest(NPC cloneNpc, Character cloneActor)
@@ -95,6 +97,15 @@ namespace ErenshorPvP
                 try
                 {
                     if (!_player.Alive) { End("player_death"); PvpTemporaryCloneFactory.DespawnAfterFight("player_death", null); return; }
+                    if (PvpTemporaryCloneFactory.CompleteNativeNavFailure(EnemyNpcs))
+                    {
+                        PvpDiagnostics.Log("technical_failure_ai_inactive reason=complete_nav_failure; " +
+                            PvpTemporaryCloneFactory.NativeNavHealthSummary() + "; " +
+                            PvpTemporaryCloneFactory.NativeCombatEvidenceSummary());
+                        End(PvpCombatStartupPolicy.TechnicalFailureAiInactive);
+                        PvpTemporaryCloneFactory.DespawnAfterFight(PvpCombatStartupPolicy.TechnicalFailureAiInactive, null);
+                        return;
+                    }
                     if (_combatStartupDeadline > 0f && Time.unscaledTime >= _combatStartupDeadline)
                     {
                         // Only proxy-owned native AI evidence satisfies the startup watchdog. World
@@ -106,6 +117,7 @@ namespace ErenshorPvP
                         {
                             PvpDiagnostics.Log("technical_failure_ai_inactive seconds=" + secondsSinceGo.ToString("0.0") +
                                 "; " + PvpTemporaryCloneFactory.NativeCombatEvidenceSummary() +
+                                "; " + PvpTemporaryCloneFactory.NativeNavHealthSummary() +
                                 "; damage_to_defenders=" + _damageToDefenders + "; healing_to_attackers=" + _healingToAttackers);
                             End(PvpCombatStartupPolicy.TechnicalFailureAiInactive);
                             PvpTemporaryCloneFactory.DespawnAfterFight(PvpCombatStartupPolicy.TechnicalFailureAiInactive, null);
@@ -498,14 +510,23 @@ namespace ErenshorPvP
             _lethalFight = true; _retreatRolled = false;
             try
             {
-                // One main-thread GO transition: first make every native runtime component ready while
-                // NeverAggro is still held, then release every attacker together, acquire only legal
-                // defender targets, and launch the native coroutines that NPC.Start would have owned.
+                // GO is a bounded release, but native NPC.Start owns the complete actor lifecycle.
+                // Prepare every proxy first, then enable every NPC in one loop. Do not manufacture
+                // NavUpdate/BehaviorUpdate coroutines here: native Start owns that graph.
+                //
+                // The NavMeshAgent itself is a different question. PvP disables the agent during
+                // countdown (PrepareTeamForCountdown / MaintainCountdownHold), and native Start does
+                // not re-enable a component PvP turned off - it only launches NavUpdate. Running
+                // UpdateNav against a disabled agent faults on the first destination write, every
+                // proxy trips CompleteNativeNavFailure, and the match dies as
+                // technical_failure_ai_inactive with the attackers standing still. Release the agent
+                // here, before the NPC is enabled, so Start's NavUpdate has a live agent to drive.
                 for (int i = 0; i < EnemyNpcs.Count; i++)
                 {
+                    PvpTemporaryCloneFactory.PrepareNativeStartProbe(EnemyNpcs[i]);
                     if (cloneSpells != null && i < cloneSpells.Count && cloneSpells[i] != null)
                         cloneSpells[i].enabled = cloneSpells[i].KnownSpells != null && cloneSpells[i].KnownSpells.Count > 0;
-                    EnemyActors[i].enabled = true; EnemyNpcs[i].enabled = true;
+                    EnemyActors[i].enabled = true;
                     try
                     {
                         NavMeshAgent nav = EnemyActors[i].GetComponent<NavMeshAgent>();
@@ -516,44 +537,48 @@ namespace ErenshorPvP
                         }
                     }
                     catch { }
+                    EnemyNpcs[i].NeverAggro = false;
                 }
-                for (int i = 0; i < EnemyNpcs.Count; i++) EnemyNpcs[i].NeverAggro = false;
-                PvpDiagnostics.Log("go_release attackers=" + EnemyNpcs.Count + "; neverAggro=false; defenders_released=true");
+                PvpDiagnostics.Log("go_release attackers=" + EnemyNpcs.Count +
+                    "; neverAggro=false; defenders_released=true; native_start_pending=" + EnemyNpcs.Count);
+                for (int i = 0; i < EnemyNpcs.Count; i++) EnemyNpcs[i].enabled = true;
 
-                for (int i = 0; i < EnemyNpcs.Count; i++)
-                {
-                    Character target = Defenders[i % Defenders.Count];
-                    EnemyNpcs[i].ForceAggroOn(target);
-                    if (EnemyNpcs[i].CurrentAggroTarget != target)
-                    {
-                        End("target_rejected");
-                        return "[Erenshor PvP] Lethal fight blocked: proxy " + (i + 1) + " rejected its target.";
-                    }
-                    // The proxy skipped NPC.Start, so these native BehaviorUpdate/NavUpdate coroutines
-                    // must be launched explicitly after GO. No custom movement or combat AI is added.
-                    PvpTemporaryCloneFactory.EnsureNativeBehaviorCoroutines(EnemyNpcs[i]);
-                }
-                int behaviorLive = 0, navLive = 0;
-                for (int i = 0; i < EnemyNpcs.Count; i++)
-                {
-                    if (PvpTemporaryCloneFactory.HasNativeBehaviorCoroutine(EnemyNpcs[i])) behaviorLive++;
-                    if (PvpTemporaryCloneFactory.HasNativeNavCoroutine(EnemyNpcs[i])) navLive++;
-                }
-                PvpDiagnostics.Log("proxy_native_coroutines behavior=" + behaviorLive + "/" + EnemyNpcs.Count +
-                    "; nav=" + navLive + "/" + EnemyNpcs.Count +
-                    " (BehaviorUpdate drives combat decisions; NavUpdate drives native pursuit)");
-                if (behaviorLive != EnemyNpcs.Count || navLive != EnemyNpcs.Count)
-                {
-                    End("native_coroutine_start_failed");
-                    return "[Erenshor PvP] Lethal fight blocked: native combat/navigation coroutines are incomplete.";
-                }
-                PvpDiagnostics.Log("lethal_started attackers=" + EnemyActors.Count + "; defenders=" + Defenders.Count + "; defender_pets=" + DefenderPets.Count + "; player_hp=" + player.MyStats.CurrentHP + "/" + player.MyStats.CurrentMaxHP);
-                return "[Erenshor PvP] Lethal team PvP started: " + EnemyActors.Count + " attacker(s) vs " + Defenders.Count + " defender(s).";
+                // Target seeding is performed by ObserveProxyNativeStartCompleted after native Start
+                // has finished and PvP identity/reward constraints have been reasserted. A coroutine
+                // handle is deliberately NOT considered navigation health.
+                PvpDiagnostics.Log("lethal_started attackers=" + EnemyActors.Count + "; defenders=" + Defenders.Count +
+                    "; defender_pets=" + DefenderPets.Count + "; player_hp=" + player.MyStats.CurrentHP + "/" +
+                    player.MyStats.CurrentMaxHP + "; nav_health=pending_native_progress");
+                return "[Erenshor PvP] Lethal team PvP started: " + EnemyActors.Count +
+                    " attacker(s) vs " + Defenders.Count + " defender(s).";
             }
             catch
             {
                 End("start_failed");
                 return "[Erenshor PvP] Lethal fight failed safely before combat began.";
+            }
+        }
+
+        internal static void ObserveProxyNativeStartCompleted(NPC npc)
+        {
+            if (!LethalFightActive || npc == null) return;
+            int index = EnemyNpcs.IndexOf(npc);
+            if (index < 0 || Defenders.Count == 0) return;
+            try
+            {
+                npc.NeverAggro = false;
+                Character target = Defenders[index % Defenders.Count];
+                npc.ForceAggroOn(target);
+                bool accepted = npc.CurrentAggroTarget == target;
+                PvpDiagnostics.Log("native_start_target_seed proxy=" + (index + 1) +
+                    "; target=" + DescribeCombatTarget(target) + "; accepted=" + accepted);
+                // Do not fabricate a target if native aggro rejects it. The bounded startup watchdog
+                // will fail the match with no rewards if native combat cannot become active.
+            }
+            catch (Exception ex)
+            {
+                PvpDiagnostics.Log("native_start_target_seed proxy=" + (index + 1) +
+                    "; accepted=false; error=" + ex.GetType().Name);
             }
         }
 

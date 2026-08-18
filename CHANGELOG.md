@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.9 - Native NPC lifecycle / navigation recovery
+
+- Restored native `NPC.Start` as the owner of each temporary proxy's complete navigation/behavior lifecycle. Proxies remain disabled through countdown; GO releases `NeverAggro` and enables the cloned NPC, then the Start postfix reasserts PvP identity/loadout/reward safety.
+- Removed manual `NavUpdate`/`BehaviorUpdate` coroutine construction/startup. A returned coroutine handle is no longer treated as runtime-health proof.
+- Fixed the nav regression this restoration introduced: countdown disables the proxy `NavMeshAgent`, and native `Start` launches `NavUpdate` but does not re-enable a component PvP turned off. `UpdateNav` therefore faulted on its first destination write, every proxy tripped complete-nav-failure, and the match ended as `technical_failure_ai_inactive` with the attackers stationary. GO now re-enables the agent (and clears `isStopped` when on-mesh) before the NPC is enabled, so native `Start`'s `NavUpdate` has a live agent. Coroutine construction remains native-owned.
+- Added bounded native navigation health telemetry: Start completion, coroutine observation, `UpdateNav` entry/first successful completion, agent/on-mesh state, destination/path evidence, movement evidence, and fault type. Complete proxy-team nav failure terminates as `technical_failure_ai_inactive` with no rewards/history credit.
+- Preserved 0.5.8 world-combat expansion, narrow protected-neutral filtering, countdown/GO semantics, self/ally healing, nameplate invariants, and reward suppression.
+
 
 ## 0.5.8 - MMO world-combat participation policy
 

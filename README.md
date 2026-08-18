@@ -4,17 +4,25 @@ Part of the **Forgotten Roads for Erenshor** mod collection.
 
 Standalone MMO-style PvP encounters for Erenshor. Practice Duels remains friendly, consensual, and non-lethal for Sims already in the zone. Erenshor PvP selects off-map Sim profiles and runs lethal encounters with normal player death and respawn. World PvP contains both consensual arranged matches and rare non-consensual wild ambushes.
 
-Current development line: 0.5.8. Remaining work is tracked in [docs/PVP_TODO.md](docs/PVP_TODO.md); the most important remaining gate is live in-game validation of native combat, visuals, rewards, and the retained-uGUI panel.
+Current development line: 0.5.9. Remaining work is tracked in [docs/PVP_TODO.md](docs/PVP_TODO.md); the most important remaining gate is live in-game validation of native combat, visuals, rewards, and the retained-uGUI panel.
 
 ### Temporary proxy startup boundary
 
-Synthetic PvP combat roots cloned from an already-running live scene NPC do not replay that
-borrowed creature's `NPC.Start` lifecycle after being converted into a non-persistent PvP identity.
-The bypass is registered-proxy-only and live-source-only; ordinary NPCs are untouched and
-resource-prefab proxies retain native startup until that lifecycle is proven separately. Before
-lethal combat, PvP verifies the Character/NPC/Stats/CastSpell/NavMesh graph and reasserts/verifies
-the no-XP/boss-XP/quest/faction/loot reward boundary. Runtime diagnostics identify proxy native-start
-entry/completion and summarize attack/heal checks and spell starts without changing balance.
+Version 0.5.9 restores the cloned proxy's own native `NPC.Start` lifecycle instead of bypassing
+Start and manually manufacturing `NavUpdate` / `BehaviorUpdate` coroutines. Temporary NPCs remain
+disabled through preparation/countdown. At GO, `NeverAggro` is released and each NPC is enabled;
+Unity/native `NPC.Start` binds and launches the complete native lifecycle. A scoped Start postfix
+then reasserts only PvP-owned synthetic identity, class loadout, nameplate ownership, and no-reward
+constraints before the initial defender target is seeded through native aggro.
+
+The previous `nav=5/5` check proved only that coroutine handles had been assigned. The 0.5.9 bounded
+probe instead records native Start completion, native nav coroutine observation, `NPC.UpdateNav`
+entry, first successful `UpdateNav` completion, NavMeshAgent enabled/on-mesh state, destination/path
+evidence, movement evidence, and fault type. A proxy team whose native nav path completely faults
+fails closed as `technical_failure_ai_inactive` with no winner/reward/history credit. The existing
+proxy-owned `NamePlateTxt` / `NamePlateObject` invariant remains enforced so restoring native Start
+does not reintroduce the earlier `HandleNameTag` failure.
+
 
 ## Status: native Lunaris migration candidate
 

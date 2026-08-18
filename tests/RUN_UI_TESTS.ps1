@@ -16,6 +16,7 @@ $csc=Find-Csc; $out=Join-Path $env:TEMP "ErenshorPvP.UiPolicyTests.exe"
   (Join-Path $Root "src\PvpPointerOwnershipState.cs") `
   (Join-Path $Root "src\PvpMatchLifecyclePolicy.cs") `
   (Join-Path $Root "src\PvpCombatStartupPolicy.cs") `
+  (Join-Path $Root "src\PvpNativeNavHealthPolicy.cs") `
   (Join-Path $Root "src\PvpWorldCombatPolicy.cs") `
   (Join-Path $Root "src\PvpPluginIdentityPolicy.cs") `
   (Join-Path $Root "tests\PvpUiPolicyTests.cs")
@@ -38,8 +39,8 @@ if ($controllerSource -notmatch '_nextOffer < Time\.unscaledTime \+ 300f') { thr
 if ($auraSource -notmatch 'Prefix \+ "ui\.state"' -or $auraSource -notmatch 'PvpUiStatePolicy\.Build') { throw "PvP Suite guard failed: ui.state provider missing." }
 Write-Host "PvP drag/Suite release source guards: PASS" -ForegroundColor Green
 
-# Native-runtime regression guard: NPC.Start may be bypassed only after NPC-side maintenance
-# state is bound, and the fail-safe must discriminate registered PvP proxies from vanilla NPCs.
+# Native-runtime regression guard: registered proxies retain the safe nameplate/maintenance
+# invariant, but native NPC.Start is restored as owner of the complete navigation lifecycle.
 $factorySource = Get-Content (Join-Path $Root "src\PvpTemporaryCloneFactory.cs") -Raw
 $startupSource = Get-Content (Join-Path $Root "src\PvpProxyStartupPolicy.cs") -Raw
 $rewardSource = Get-Content (Join-Path $Root "src\PvpRewardService.cs") -Raw
@@ -87,8 +88,11 @@ foreach ($token in @(
   'go_release',
   'TrySetField(npc, "navDo", null)',
   'TrySetField(npc, "behDo", null)',
-  'HasNativeNavCoroutine',
-  'proxy_native_coroutines',
+  'PrepareNativeStartProbe',
+  'ObserveNativeNavEntered',
+  'ObserveNativeNavCompleted',
+  'proxy_nav_faulted',
+  'NativeNavHealthSummary',
   'native_update_reached',
   'combat_section_reached',
   'legal_target_acquired',
@@ -107,6 +111,19 @@ foreach ($token in @(
   if (($controllerSource + $factorySource + $containmentSource + $lifecycleSource + $startupPolicySource) -notmatch [regex]::Escape($token)) {
     throw "PvP match-start/native-AI guard failed: missing $token"
   }
+}
+if ($factorySource -match 'EnsureNativeBehaviorCoroutines' -or $factorySource -match 'StartCoroutine\(' -or
+    $factorySource -match 'InvokeCoroutineBody') {
+  throw "PvP native lifecycle guard failed: manual NavUpdate/BehaviorUpdate coroutine startup returned."
+}
+if ($factorySource -notmatch '\[HarmonyPatch\(typeof\(NPC\), "UpdateNav"\)\]' -or
+    $factorySource -notmatch 'ObserveNativeNavException' -or
+    $containmentSource -notmatch 'CompleteNativeNavFailure') {
+  throw "PvP nav health guard failed: actual UpdateNav progression/fault probe missing."
+}
+if ($factorySource -notmatch 'npc\.enabled = false' -or $containmentSource -notmatch 'EnemyNpcs\[i\]\.enabled = true' -or
+    $containmentSource -notmatch 'ObserveProxyNativeStartCompleted') {
+  throw "PvP native Start lifecycle guard failed: countdown hold or GO Start completion wiring missing."
 }
 if ($factorySource -notmatch 'npc\.NoSelfHeal = false') { throw "PvP healing guard failed: native self-heal remains disabled." }
 if ($factorySource -notmatch 'if \(npc\.NoSelfHeal\) failures\.Add') { throw "PvP healing guard failed: runtime verifier still expects self-heal suppression." }
@@ -164,3 +181,44 @@ if ($factorySource -notmatch 'TeamClones\.Count == 0 && _clone == null\) return'
   throw "PvP cleanup guard failed: duplicate-safe terminal cleanup missing."
 }
 Write-Host "PvP arranged match-start/native-AI source guards: PASS" -ForegroundColor Green
+
+# Final forensic combat-recovery matrix (task cases 24-49). These are source/pure-policy
+# contracts; current-assembly build and live two-match acceptance remain separate gates.
+$navPolicySource = Get-Content (Join-Path $Root "src\PvpNativeNavHealthPolicy.cs") -Raw
+$identityPolicySource = Get-Content (Join-Path $Root "src\PvpPluginIdentityPolicy.cs") -Raw
+$finalRecoveryCases = 0
+function Assert-Recovery([bool]$condition, [string]$name) {
+  if (-not $condition) { throw ("PvP final recovery matrix failed: " + $name) }
+  $script:finalRecoveryCases++
+}
+
+Assert-Recovery ($identityPolicySource -match 'ExactlyOneExpectedIdentity') '24 exactly one effective ErenshorPvP identity policy'
+Assert-Recovery ($startupSource -match 'hasNamePlateText' -and $startupSource -match 'hasNamePlateObject') '25 runtime invariant includes nameplate dependencies'
+Assert-Recovery ($factorySource -match 'NamePlateTxt' -and $factorySource -match 'HandleNameTag') '26 HandleNameTag/nameplate regression guard retained'
+Assert-Recovery ($factorySource -match 'npc\.NeverAggro = true' -and $factorySource -match 'npc\.enabled = false' -and $containmentSource -match 'IsTemporaryActor\(target\)') '27 countdown holds attackers and defenders'
+Assert-Recovery ($controllerSource -match 'go_count=' -and $containmentSource -match 'go_release' -and $lifecycleSource -match 'GoTransitions') '28 GO releases once'
+Assert-Recovery ($factorySource -match 'ValidateProxyStartupInvariant' -and $factorySource -match 'action=blocked_invalid') '29 native dependencies validated before Start/Active'
+Assert-Recovery ($navPolicySource -match 'LaunchAloneIsHealthy' -and $navPolicySource -match 'return false') '30 coroutine launch alone is not healthy'
+Assert-Recovery ($navPolicySource -match 'faulted' -and $navPolicySource -match '!faulted') '31 first MoveNext/UpdateNav fault is unhealthy'
+Assert-Recovery ($factorySource -match 'ObserveNativeNavEntered' -and $factorySource -match 'ObserveNativeNavCompleted') '32 UpdateNav progression is health evidence'
+Assert-Recovery ($navPolicySource -match 'NeedsPursuit' -and $factorySource -match 'nav_pursuit_requested') '33 out-of-range melee pursuit evidence'
+Assert-Recovery ($navPolicySource -match 'distance > attackRange' -or $navPolicySource -match 'distance > Mathf') '34 ranged in-range does not require artificial movement'
+Assert-Recovery ($factorySource -match 'legal_target_acquired') '35 native target acquisition evidence'
+Assert-Recovery ($factorySource -match 'combat_section_reached' -and $factorySource -match 'native_update_reached') '36 native BehaviorUpdate/combat progression evidence'
+Assert-Recovery ($factorySource -match 'attack_spell_decision') '37 attack spell decision evidence'
+Assert-Recovery ($factorySource -match 'npc\.NoSelfHeal = false' -and $containmentSource -match 'AllowHeal') '38 self/ally healing admitted'
+Assert-Recovery ($worldPolicySource -match 'outside world actor' -or $worldPolicySource -match 'AllowWorld') '39 ordinary hostile world actor may join'
+Assert-Recovery ($worldPolicySource -match 'simPlayer \|\| ownedOrSummoned') '40 Sim participation is not protected-NPC interference'
+Assert-Recovery ($worldPolicySource -match 'ownedOrSummoned') '41 pet/summon participation is not protected-NPC interference'
+Assert-Recovery ($containmentSource -notmatch 'third_party_aggro' -and $controllerSource -notmatch 'third_party_aggro') '42 third_party_aggro is not a runtime terminal path'
+Assert-Recovery ($factorySource -match 'protected_target_cleared') '43 protected neutral target is rejected narrowly'
+Assert-Recovery ($factorySource -match 'ForceAggroOn\(null\)' -and $factorySource -match 'protected_target_cleared') '44 protected target rejection clears target without match cancel'
+Assert-Recovery ($containmentSource -match 'CompleteNativeNavFailure' -and $containmentSource -match 'technical_failure_ai_inactive') '45 complete nav failure becomes technical failure'
+Assert-Recovery ($factorySource -match 'winner=none' -and $factorySource -match 'winner = null') '46 technical failure winner none'
+Assert-Recovery ($factorySource -match 'xp=0; gold=0' -and $factorySource -match 'history_credit=false') '47 technical failure zero rewards/history'
+Assert-Recovery ($rewardSource -match '_lastClaimedMatchId' -and $rewardSource -match 'already claimed') '48 legitimate victory reward exact-once'
+Assert-Recovery ($controllerSource -match 'EncounterCleaned' -and $factorySource -match 'TeamClones\.Clear\(\)') '49 repeated-match cleanup permits second match'
+
+if ($finalRecoveryCases -ne 26) { throw "PvP final recovery matrix count mismatch: $finalRecoveryCases / 26" }
+Write-Host ("PvP final forensic recovery source matrix: PASS (" + $finalRecoveryCases + "/26)") -ForegroundColor Green
+

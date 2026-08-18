@@ -31,7 +31,20 @@ namespace ErenshorPvP
         private static readonly Dictionary<int, int> HealCheckCounts = new Dictionary<int, int>();
         private static readonly Dictionary<int, int> SpellStartCounts = new Dictionary<int, int>();
         private static readonly Dictionary<int, int> LastSpellStartFrame = new Dictionary<int, int>();
-        private static readonly HashSet<int> NativeStartBypassEligible = new HashSet<int>();
+        private static readonly HashSet<int> NativeStartCompleted = new HashSet<int>();
+        private sealed class NativeNavProbe
+        {
+            internal bool CoroutineObserved;
+            internal bool UpdateNavReached;
+            internal bool FirstUpdateNavCompleted;
+            internal bool Faulted;
+            internal string FaultType = string.Empty;
+            internal bool DestinationAttempted;
+            internal bool MovementObserved;
+            internal Vector3 StartPosition;
+            internal Vector3 LastPosition;
+        }
+        private static readonly Dictionary<int, NativeNavProbe> NativeNavProbes = new Dictionary<int, NativeNavProbe>();
         private static readonly HashSet<int> NativeUpdateReached = new HashSet<int>();
         private static readonly HashSet<int> CombatSectionReached = new HashSet<int>();
         private static readonly HashSet<int> LegalTargetAcquired = new HashSet<int>();
@@ -61,6 +74,7 @@ namespace ErenshorPvP
                 Despawn("runtime_invalid");
                 return;
             }
+            TickNativeNavHealth();
             PvpCombatContainment.Tick();
             if (TeamClones.Count > 0 && Time.unscaledTime >= _despawnAt) Despawn("timer");
         }
@@ -160,11 +174,11 @@ namespace ErenshorPvP
                 if (nav != null) nav.enabled = false;
 
                 ConfigureNativeMaintenanceState(npc, actor, spells, nav);
-                if (npc != null && (_templateSource ?? string.Empty).StartsWith("live:", StringComparison.OrdinalIgnoreCase))
+                if (npc != null)
                 {
-                    // Runtime IEnumerator fields copied from a live template are not proof that a
-                    // coroutine is scheduled on this clone. The proxy bypasses NPC.Start, so discard
-                    // any borrowed handles now and establish fresh native nav/behavior coroutines at GO.
+                    // IEnumerator fields copied from a source component are never proof of a
+                    // scheduled coroutine on the clone. Native NPC.Start will establish fresh
+                    // nav/behavior coroutine ownership when this proxy is enabled at GO.
                     TrySetField(npc, "navDo", null);
                     TrySetField(npc, "behDo", null);
                 }
@@ -183,8 +197,6 @@ namespace ErenshorPvP
                 TemporaryActorIds.Add(clone.GetInstanceID());
                 TeamClones.Add(clone);
                 TeamProfiles.Add(profile);
-                if ((_templateSource ?? string.Empty).StartsWith("live:", StringComparison.OrdinalIgnoreCase))
-                    NativeStartBypassEligible.Add(clone.GetInstanceID());
                 if (_clone == null) { _clone = clone; _activeProfile = profile; }
                 string runtimeState;
                 bool runtimeReady = ValidateNativeMaintenanceState(npc, actor, actor == null ? null : actor.MyStats, spells, nav, out runtimeState);
@@ -386,7 +398,8 @@ namespace ErenshorPvP
                 AttackSpellDecisionLogged.Remove(member.GetInstanceID());
                 HealCheckCounts.Remove(member.GetInstanceID());
                 SpellStartCounts.Remove(member.GetInstanceID());
-                NativeStartBypassEligible.Remove(member.GetInstanceID());
+                NativeStartCompleted.Remove(member.GetInstanceID());
+                NativeNavProbes.Remove(member.GetInstanceID());
                 NativeUpdateReached.Remove(member.GetInstanceID());
                 CombatSectionReached.Remove(member.GetInstanceID());
                 LegalTargetAcquired.Remove(member.GetInstanceID());
@@ -395,7 +408,7 @@ namespace ErenshorPvP
                 NativeUpdateExceptionLogged.Remove(member.GetInstanceID());
                 try { UnityEngine.Object.Destroy(member); } catch { }
             }
-            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); EligibleHealSpellCounts.Clear(); AttackDecisionCounts.Clear(); AttackSkillDecisionLogged.Clear(); AttackSpellDecisionLogged.Clear(); HealCheckCounts.Clear(); SpellStartCounts.Clear(); LastSpellStartFrame.Clear(); NativeStartBypassEligible.Clear(); NativeUpdateReached.Clear(); CombatSectionReached.Clear(); LegalTargetAcquired.Clear(); NavPursuitRequested.Clear(); MeleeAttemptCounts.Clear(); NativeUpdateExceptionLogged.Clear(); _runtimeInvalidCleanupQueued = false; _runtimeInvalidReason = string.Empty; DestroyTemporarySpells();
+            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); EligibleHealSpellCounts.Clear(); AttackDecisionCounts.Clear(); AttackSkillDecisionLogged.Clear(); AttackSpellDecisionLogged.Clear(); HealCheckCounts.Clear(); SpellStartCounts.Clear(); LastSpellStartFrame.Clear(); NativeStartCompleted.Clear(); NativeNavProbes.Clear(); NativeUpdateReached.Clear(); CombatSectionReached.Clear(); LegalTargetAcquired.Clear(); NavPursuitRequested.Clear(); MeleeAttemptCounts.Clear(); NativeUpdateExceptionLogged.Clear(); _runtimeInvalidCleanupQueued = false; _runtimeInvalidReason = string.Empty; DestroyTemporarySpells();
             ErenshorPvpEvents.Publish(new PvpSemanticEvent("pvp_proxy_despawned", string.Empty, "PvP Proxy",
                 string.Empty, "cleanup", reason ?? "manual"));
             PvpController.EncounterCleaned();
@@ -475,8 +488,9 @@ namespace ErenshorPvP
             if (npc == null) return;
             try
             {
-                // These are exactly the references NPC.Start normally binds before Update begins.
-                // Do not invoke Start: it rebuilds a borrowed creature identity and source state.
+                // These are the Start-owned references that must still point at the converted proxy after
+                // native Start completes. The same routine also establishes a safe pre-Start graph for
+                // countdown validation.
                 TrySetField(npc, "Myself", actor);
                 TrySetField(npc, "MyStats", actor == null ? null : actor.MyStats);
                 TrySetField(npc, "MySpells", caster);
@@ -508,9 +522,9 @@ namespace ErenshorPvP
         //
         // Verified against the installed Assembly-CSharp.dll: NamePlateTxt and NamePlateObject are written
         // by NPC.Start and by nothing else, and read by HandleNameTag (NamePlateObject also by Start).
-        // PvpProxyStartupPolicy.ShouldRunNativeNpcStart deliberately suppresses that Start for a live-cloned
-        // proxy, and ConfigureNativeMaintenanceState restored the other Start-owned references but not these
-        // two - which is the whole reason the 5v5 attackers stood still and dealt zero damage.
+        // The 0.5.5 repair originally reconstructed these because 0.5.4/0.5.5 bypassed native Start.
+        // 0.5.9 preserves the proxy-owned nameplate invariant even though native Start is restored, so a
+        // template/source nameplate is never shared across actors.
         //
         // Native Start's recipe (IL_0475-0682) is reproduced here in the same order:
         //   NamePlate       = Instantiate(GameData.GM.GetComponent<Misc>().NamePlate, pos, rot).transform
@@ -564,87 +578,153 @@ namespace ErenshorPvP
             catch { }
         }
 
-        // SECOND half of the bypassed-Start problem. Repairing NamePlateTxt fixed NPC.Update, but the
-        // actual combat AI does not live in Update at all. Verified against the installed
-        // Assembly-CSharp.dll, the decision chain is:
-        //
-        //   NPC.BehaviorUpdate(0.1f)  [coroutine]  -> DoNonRaidBehavior / DoRaidBehavior
-        //        -> Combat -> DoAttackSpell / DoAttackSkill / PerformMeleeHit
-        //        -> CheckHeals / CheckBuffs
-        //
-        // and NPC.Start is the only place that launches it (IL_07AA-07F4):
-        //
-        //   if (!NeverAggro) { navDo = NavUpdate(0.3f); StartCoroutine(navDo); }
-        //   behDo = BehaviorUpdate(0.1f); StartCoroutine(behDo);
-        //
-        // Because a live-cloned proxy deliberately skips Start, neither coroutine was ever started, so
-        // the proxy could hold a valid forced aggro target and still never evaluate a single attack,
-        // spell, or heal. That is the residual "attackers stand still" behaviour that survived the
-        // nameplate fix (damage_to_defenders=0 / attack_spell_decisions=0 / heal_checks=0 with zero NREs).
-        //
-        // Started at combat activation rather than at spawn so proxies stay inert while preparing, and
-        // idempotent so a proxy can never run two behaviour coroutines.
-        internal static bool EnsureNativeBehaviorCoroutines(NPC npc)
+        // 0.5.9 forensic recovery: native NPC.Start owns the complete navigation/behavior
+        // lifecycle. Do not manufacture NavUpdate/BehaviorUpdate IEnumerator instances here. A
+        // non-null coroutine field proves only launch; the bounded probe below requires native Start,
+        // UpdateNav entry, a completed first UpdateNav call, and no fault.
+        internal static void PrepareNativeStartProbe(NPC npc)
         {
-            if (npc == null || !IsTemporaryNpc(npc)) return false;
+            if (npc == null || !IsTemporaryNpc(npc) || npc.gameObject == null) return;
+            int id = npc.gameObject.GetInstanceID();
+            NativeStartCompleted.Remove(id);
+            NativeNavProbe probe = new NativeNavProbe();
             try
             {
-                if (!npc.isActiveAndEnabled) return false;
-
-                // Native Start owns these independently: with NeverAggro=true it can have behDo
-                // resident while navDo is still null. Never treat one handle as proof of the other.
-                object existingNav;
-                bool navRunning = TryReadField(npc, "navDo", out existingNav) && existingNav != null;
-                if (!npc.NeverAggro && !navRunning)
-                {
-                    object navEnumerator = InvokeCoroutineBody(npc, "NavUpdate", 0.3f);
-                    if (navEnumerator is System.Collections.IEnumerator)
-                    {
-                        TrySetField(npc, "navDo", navEnumerator);
-                        npc.StartCoroutine((System.Collections.IEnumerator)navEnumerator);
-                        navRunning = true;
-                    }
-                }
-
-                object existingBeh;
-                bool behaviorRunning = TryReadField(npc, "behDo", out existingBeh) && existingBeh != null;
-                if (!behaviorRunning)
-                {
-                    object behEnumerator = InvokeCoroutineBody(npc, "BehaviorUpdate", 0.1f);
-                    if (behEnumerator is System.Collections.IEnumerator)
-                    {
-                        TrySetField(npc, "behDo", behEnumerator);
-                        npc.StartCoroutine((System.Collections.IEnumerator)behEnumerator);
-                        behaviorRunning = true;
-                    }
-                }
-                return behaviorRunning && (npc.NeverAggro || navRunning);
+                probe.StartPosition = npc.transform.position;
+                probe.LastPosition = probe.StartPosition;
             }
-            catch { return false; }
+            catch { }
+            NativeNavProbes[id] = probe;
+            // A cloned component may carry IEnumerator fields copied from the already-started source.
+            // They are not running on this MonoBehaviour and must never be mistaken for native health.
+            TrySetField(npc, "navDo", null);
+            TrySetField(npc, "behDo", null);
         }
 
-        private static object InvokeCoroutineBody(NPC npc, string methodName, float waitSeconds)
+        internal static void ObserveNativeNavEntered(NPC npc)
         {
-            try
+            if (npc == null || !IsTemporaryNpc(npc) || npc.gameObject == null) return;
+            NativeNavProbe probe;
+            if (!NativeNavProbes.TryGetValue(npc.gameObject.GetInstanceID(), out probe)) return;
+            probe.UpdateNavReached = true;
+            object navDo;
+            if (TryReadField(npc, "navDo", out navDo) && navDo != null) probe.CoroutineObserved = true;
+        }
+
+        internal static void ObserveNativeNavCompleted(NPC npc)
+        {
+            if (npc == null || !IsTemporaryNpc(npc) || npc.gameObject == null) return;
+            NativeNavProbe probe;
+            if (!NativeNavProbes.TryGetValue(npc.gameObject.GetInstanceID(), out probe)) return;
+            probe.UpdateNavReached = true;
+            probe.FirstUpdateNavCompleted = true;
+            object navDo;
+            if (TryReadField(npc, "navDo", out navDo) && navDo != null) probe.CoroutineObserved = true;
+        }
+
+        internal static Exception ObserveNativeNavException(NPC npc, Exception exception)
+        {
+            if (exception == null || npc == null || !IsTemporaryNpc(npc) || npc.gameObject == null) return exception;
+            int id = npc.gameObject.GetInstanceID();
+            NativeNavProbe probe;
+            if (!NativeNavProbes.TryGetValue(id, out probe))
             {
-                MethodInfo method = AccessTools.Method(typeof(NPC), methodName, new Type[] { typeof(float) });
-                if (method == null) return null;
-                return method.Invoke(npc, new object[] { waitSeconds });
+                probe = new NativeNavProbe();
+                NativeNavProbes[id] = probe;
             }
-            catch { return null; }
+            bool first = !probe.Faulted;
+            probe.Faulted = true;
+            probe.FaultType = exception.GetType().Name;
+            if (first)
+                PvpDiagnostics.Log("proxy_nav_faulted proxy=" + SafeProxyName(npc) +
+                    "; fault=" + probe.FaultType + "; updateNavReached=" + probe.UpdateNavReached +
+                    "; firstUpdateNavCompleted=" + probe.FirstUpdateNavCompleted);
+            return exception; // diagnostics only; never hide a native navigation failure.
         }
 
-        // Proof for telemetry/validation that the behaviour coroutine is actually resident.
-        internal static bool HasNativeBehaviorCoroutine(NPC npc)
+        internal static bool NativeNavHealthy(NPC npc)
         {
-            object value;
-            return npc != null && TryReadField(npc, "behDo", out value) && value != null;
+            if (npc == null || !IsTemporaryNpc(npc) || npc.gameObject == null) return false;
+            int id = npc.gameObject.GetInstanceID();
+            NativeNavProbe probe;
+            if (!NativeNavProbes.TryGetValue(id, out probe)) return false;
+            return PvpNativeNavHealthPolicy.IsHealthy(NativeStartCompleted.Contains(id),
+                probe.CoroutineObserved, probe.UpdateNavReached, probe.FirstUpdateNavCompleted, probe.Faulted);
         }
 
-        internal static bool HasNativeNavCoroutine(NPC npc)
+        internal static bool CompleteNativeNavFailure(IList<NPC> npcs)
         {
-            object value;
-            return npc != null && TryReadField(npc, "navDo", out value) && value != null;
+            if (npcs == null || npcs.Count == 0) return false;
+            int faulted = 0, relevant = 0;
+            for (int i = 0; i < npcs.Count; i++)
+            {
+                NPC npc = npcs[i];
+                if (npc == null || !IsTemporaryNpc(npc) || npc.gameObject == null) continue;
+                relevant++;
+                NativeNavProbe probe;
+                if (NativeNavProbes.TryGetValue(npc.gameObject.GetInstanceID(), out probe) && probe.Faulted) faulted++;
+            }
+            return PvpNativeNavHealthPolicy.CompleteNavFailure(relevant, faulted);
+        }
+
+        internal static string NativeNavHealthSummary()
+        {
+            int starts = 0, coroutine = 0, entered = 0, completed = 0, destination = 0, movement = 0, faulted = 0;
+            int agentPresent = 0, agentEnabled = 0, onMesh = 0;
+            for (int i = 0; i < TeamClones.Count; i++)
+            {
+                GameObject go = TeamClones[i]; if (go == null) continue; int id = go.GetInstanceID();
+                if (NativeStartCompleted.Contains(id)) starts++;
+                NativeNavProbe probe;
+                if (NativeNavProbes.TryGetValue(id, out probe))
+                {
+                    if (probe.CoroutineObserved) coroutine++;
+                    if (probe.UpdateNavReached) entered++;
+                    if (probe.FirstUpdateNavCompleted) completed++;
+                    if (probe.DestinationAttempted) destination++;
+                    if (probe.MovementObserved) movement++;
+                    if (probe.Faulted) faulted++;
+                }
+                try
+                {
+                    NavMeshAgent nav = go.GetComponent<NavMeshAgent>();
+                    if (nav != null)
+                    {
+                        agentPresent++;
+                        if (nav.enabled) agentEnabled++;
+                        if (nav.enabled && nav.isOnNavMesh) onMesh++;
+                    }
+                }
+                catch { }
+            }
+            return "nav_start_completed=" + starts + "/" + TeamClones.Count +
+                "; nav_coroutine_observed=" + coroutine + "; updateNav_reached=" + entered +
+                "; nav_first_step_completed=" + completed + "; nav_destination=" + destination +
+                "; nav_movement=" + movement + "; nav_faulted=" + faulted +
+                "; nav_agents=" + agentPresent + "; nav_enabled=" + agentEnabled + "; nav_on_mesh=" + onMesh;
+        }
+
+        private static void TickNativeNavHealth()
+        {
+            if (!PvpCombatContainment.LethalFightActive) return;
+            for (int i = 0; i < TeamClones.Count; i++)
+            {
+                GameObject go = TeamClones[i]; if (go == null) continue;
+                NativeNavProbe probe; int id = go.GetInstanceID();
+                if (!NativeNavProbes.TryGetValue(id, out probe)) continue;
+                try
+                {
+                    NPC npc = go.GetComponent<NPC>();
+                    NavMeshAgent nav = go.GetComponent<NavMeshAgent>();
+                    object navDo;
+                    if (npc != null && TryReadField(npc, "navDo", out navDo) && navDo != null) probe.CoroutineObserved = true;
+                    if (nav != null && nav.enabled && nav.isOnNavMesh && nav.hasPath) probe.DestinationAttempted = true;
+                    Vector3 position = go.transform.position;
+                    if (!probe.MovementObserved && (position - probe.StartPosition).sqrMagnitude > 0.04f) probe.MovementObserved = true;
+                    probe.LastPosition = position;
+                }
+                catch { }
+            }
         }
 
         private static TextMeshPro ApplyNamePlateText(TextMeshPro text, string value)
@@ -745,27 +825,92 @@ namespace ErenshorPvP
         {
             temporaryNativeStartExpected = false;
             if (!IsTemporaryNpc(npc)) return true;
+
             string reason;
             bool ready = ValidateProxyStartupInvariant(npc == null ? null : npc.gameObject, out reason);
-            int id = npc == null || npc.gameObject == null ? 0 : npc.gameObject.GetInstanceID();
-            bool liveStartedClone = id != 0 && NativeStartBypassEligible.Contains(id);
-            bool runNative = PvpProxyStartupPolicy.ShouldRunNativeNpcStart(true, liveStartedClone);
+            if (!ready)
+            {
+                if (!_runtimeInvalidCleanupQueued)
+                {
+                    _runtimeInvalidCleanupQueued = true;
+                    _runtimeInvalidReason = "pre_start/" + reason;
+                }
+                PvpDiagnostics.Log("proxy_native_start action=blocked_invalid; proxy=" + SafeProxyName(npc) +
+                    "; pre_start_invariant=fail:" + reason + "; template=" + _templateSource);
+                return false;
+            }
+
+            bool runNative = PvpProxyStartupPolicy.ShouldRunNativeNpcStart(true, true);
             temporaryNativeStartExpected = runNative;
-            PvpDiagnostics.Log("proxy_native_start action=" + (runNative ? "native_pending" : "bypass") +
-                "; proxy=" + SafeProxyName(npc) + "; invariant=" + (ready ? "pass" : "fail:" + reason) +
-                "; template=" + _templateSource + "; source_started=" + liveStartedClone);
-            // Only live-scene source NPCs are known to have already completed their native startup
-            // before cloning. Replaying that borrowed lifecycle after conversion to a PvP identity
-            // caused the observed NPC.Start failure and can restore source state. Resource-prefab
-            // clones retain native Start until their lifecycle is proven separately.
+            PvpDiagnostics.Log("proxy_native_start action=native_pending; proxy=" + SafeProxyName(npc) +
+                "; pre_start_invariant=pass; template=" + _templateSource);
             return runNative;
         }
 
         internal static void ObserveNativeNpcStartCompleted(NPC npc, bool temporaryNativeStartExpected)
         {
-            if (!temporaryNativeStartExpected || !IsTemporaryNpc(npc)) return;
+            if (!temporaryNativeStartExpected || !IsTemporaryNpc(npc) || npc.gameObject == null) return;
+            int id = npc.gameObject.GetInstanceID();
+            NativeStartCompleted.Add(id);
+            NativeNavProbe probe;
+            if (!NativeNavProbes.TryGetValue(id, out probe))
+            {
+                probe = new NativeNavProbe();
+                try { probe.StartPosition = probe.LastPosition = npc.transform.position; } catch { }
+                NativeNavProbes[id] = probe;
+            }
+            object navDo;
+            if (TryReadField(npc, "navDo", out navDo) && navDo != null) probe.CoroutineObserved = true;
+
+            Character actor = npc.GetComponent<Character>();
+            CastSpell caster = npc.GetComponent<CastSpell>();
+            NavMeshAgent nav = npc.GetComponent<NavMeshAgent>();
+            int teamIndex = TeamClones.IndexOf(npc.gameObject);
+            PvpOpponentProfile profile = teamIndex >= 0 && teamIndex < TeamProfiles.Count ? TeamProfiles[teamIndex] : null;
+            try
+            {
+                // Native Start is authoritative for the lifecycle graph. Immediately reassert only
+                // PvP-owned identity/loadout/reward constraints that Start may derive from the borrowed body.
+                npc.ThisSim = null;
+                npc.SimPlayer = false;
+                npc.InGroup = false;
+                npc.NeverAggro = false;
+                ApplyProfileLoadout(npc, profile);
+                ConfigureNativeMaintenanceState(npc, actor, caster, nav);
+                SuppressBorrowedDeathRewards(actor);
+            }
+            catch { }
+
+            string invariant, reward;
+            bool runtimeValid = ValidateProxyStartupInvariant(npc.gameObject, out invariant);
+            bool rewardValid = ValidateProxyRewardBoundary(npc.gameObject, out reward);
             PvpDiagnostics.Log("proxy_native_start action=native; completion=completed; proxy=" + SafeProxyName(npc) +
-                "; template=" + _templateSource);
+                "; runtime=" + (runtimeValid ? "pass" : "fail:" + invariant) +
+                "; reward=" + (rewardValid ? "pass" : "fail:" + reward) +
+                "; nav_coroutine_observed=" + probe.CoroutineObserved + "; template=" + _templateSource);
+            if (!runtimeValid || !rewardValid)
+            {
+                _runtimeInvalidCleanupQueued = true;
+                _runtimeInvalidReason = !runtimeValid ? invariant : reward;
+                return;
+            }
+            PvpCombatContainment.ObserveProxyNativeStartCompleted(npc);
+        }
+
+        internal static void ObserveNativeNpcStartFailed(NPC npc, Exception exception)
+        {
+            if (npc == null || !IsTemporaryNpc(npc) || npc.gameObject == null || exception == null) return;
+            int id = npc.gameObject.GetInstanceID();
+            NativeNavProbe probe;
+            if (!NativeNavProbes.TryGetValue(id, out probe))
+            {
+                probe = new NativeNavProbe();
+                NativeNavProbes[id] = probe;
+            }
+            probe.Faulted = true;
+            probe.FaultType = "NPC.Start/" + exception.GetType().Name;
+            _runtimeInvalidCleanupQueued = true;
+            _runtimeInvalidReason = probe.FaultType;
         }
 
         internal static bool ValidateProxyRewardBoundary(GameObject go, out string reason)
@@ -1002,16 +1147,17 @@ namespace ErenshorPvP
                     return false;
                 }
 
-                // Countdown is a real native-maintenance phase, not combat. Keep NPC.Update and
-                // presentation alive so any runtime invariant failure surfaces before GO, while
-                // NeverAggro, disabled spell casting, and the disabled NavMeshAgent prevent the
-                // temporary opponent from beginning combat early.
-                if (npc != null) { npc.NeverAggro = true; npc.enabled = true; }
+                // Keep the NPC component disabled through countdown so Unity has not yet invoked
+                // its Start lifecycle. At GO we clear NeverAggro, enable nav/spells, then enable NPC;
+                // native Start therefore launches BOTH NavUpdate and BehaviorUpdate under the same
+                // conditions as the recent live-good implementation.
+                if (npc != null) { npc.NeverAggro = true; npc.enabled = false; }
                 if (actor != null) actor.enabled = true;
                 if (caster != null) caster.enabled = false;
                 if (nav != null) nav.enabled = false;
                 PvpDiagnostics.Log("proxy_prepared proxy=" + (i + 1) + "; neverAggro=" +
                     (npc == null ? "missing" : npc.NeverAggro.ToString().ToLowerInvariant()) +
+                    "; npc_enabled=" + (npc != null && npc.enabled) +
                     "; spells_enabled=" + (caster != null && caster.enabled) + "; nav_enabled=" + (nav != null && nav.enabled));
             }
             return true;
@@ -1029,9 +1175,10 @@ namespace ErenshorPvP
                 NavMeshAgent nav = member == null ? null : member.GetComponent<NavMeshAgent>();
                 if (npc == null) { reason = "proxy" + (i + 1) + "_npc_missing"; return false; }
                 npc.NeverAggro = true;
+                npc.enabled = false;
                 if (caster != null) caster.enabled = false;
                 try { if (nav != null) nav.enabled = false; } catch { }
-                if (!npc.NeverAggro || (caster != null && caster.enabled) || (nav != null && nav.enabled))
+                if (!npc.NeverAggro || npc.enabled || (caster != null && caster.enabled) || (nav != null && nav.enabled))
                 {
                     reason = "proxy" + (i + 1) + "_hold_failed";
                     return false;
@@ -1043,8 +1190,9 @@ namespace ErenshorPvP
         internal static string BeginLethalFight()
         {
             if (_clone == null) return "[Erenshor PvP] Spawn a temporary proxy first: /epvp spawnclone";
-            // Registered synthetic proxies bypass borrowed NPC.Start. Validate the component graph
-            // before enabling combat, then reassert the PvP-owned class/runtime state.
+            // Validate the converted proxy graph before GO. Native NPC.Start is intentionally restored
+            // as the owner of its full navigation/behavior lifecycle; the Start postfix reasserts
+            // PvP identity/reward state immediately after native initialization.
             for (int i = 0; i < TeamClones.Count; i++)
             {
                 string invariant;
@@ -1254,7 +1402,8 @@ namespace ErenshorPvP
                 AttackSpellDecisionLogged.Remove(member.GetInstanceID());
                 HealCheckCounts.Remove(member.GetInstanceID());
                 SpellStartCounts.Remove(member.GetInstanceID());
-                NativeStartBypassEligible.Remove(member.GetInstanceID());
+                NativeStartCompleted.Remove(member.GetInstanceID());
+                NativeNavProbes.Remove(member.GetInstanceID());
                 NativeUpdateReached.Remove(member.GetInstanceID());
                 CombatSectionReached.Remove(member.GetInstanceID());
                 LegalTargetAcquired.Remove(member.GetInstanceID());
@@ -1263,7 +1412,7 @@ namespace ErenshorPvP
                 NativeUpdateExceptionLogged.Remove(member.GetInstanceID());
                 try { UnityEngine.Object.Destroy(member); } catch { }
             }
-            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); EligibleHealSpellCounts.Clear(); AttackDecisionCounts.Clear(); AttackSkillDecisionLogged.Clear(); AttackSpellDecisionLogged.Clear(); HealCheckCounts.Clear(); SpellStartCounts.Clear(); LastSpellStartFrame.Clear(); NativeStartBypassEligible.Clear(); NativeUpdateReached.Clear(); CombatSectionReached.Clear(); LegalTargetAcquired.Clear(); NavPursuitRequested.Clear(); MeleeAttemptCounts.Clear(); NativeUpdateExceptionLogged.Clear(); DestroyTemporarySpells();
+            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); EligibleHealSpellCounts.Clear(); AttackDecisionCounts.Clear(); AttackSkillDecisionLogged.Clear(); AttackSpellDecisionLogged.Clear(); HealCheckCounts.Clear(); SpellStartCounts.Clear(); LastSpellStartFrame.Clear(); NativeStartCompleted.Clear(); NativeNavProbes.Clear(); NativeUpdateReached.Clear(); CombatSectionReached.Clear(); LegalTargetAcquired.Clear(); NavPursuitRequested.Clear(); MeleeAttemptCounts.Clear(); NativeUpdateExceptionLogged.Clear(); DestroyTemporarySpells();
             PvpDiagnostics.Log("validation_cleanup match=" + ShortMatch(completedMatchId) +
                 "; proxy_collections=" + TeamClones.Count + "; profile_collections=" + TeamProfiles.Count +
                 "; spell_collections=" + TemporarySpells.Count + "; destroy_scheduled=" + proxyCount);
@@ -1764,9 +1913,9 @@ namespace ErenshorPvP
         private static bool Prefix() { return !PvpTemporaryCloneFactory.SuppressPersistentLoad; }
     }
 
-    // The borrowed native mob Start lifecycle is not valid for a registered synthetic PvP root:
-    // it has already been converted to a non-persistent, reward-suppressed proxy and prior live
-    // evidence showed Start restoring borrowed state. Scope the bypass to registered PvP roots only.
+    // 0.5.9 forensic recovery: the cloned NPC must receive its own native Start lifecycle. The
+    // Prefix scopes diagnostics to registered PvP roots; the Postfix immediately reasserts PvP-owned
+    // identity/loadout/reward state. Vanilla NPCs are untouched.
     [HarmonyPatch(typeof(NPC), "Start")]
     internal static class PvpTemporaryNpcStartPatch
     {
@@ -1786,10 +1935,13 @@ namespace ErenshorPvP
         private static Exception Finalizer(NPC __instance, bool __state, Exception __exception)
         {
             if (__state && __exception != null && PvpTemporaryCloneFactory.IsTemporaryNpc(__instance))
+            {
                 PvpDiagnostics.Log("proxy_native_start action=native; completion=failed; proxy=" +
                     (__instance == null ? "null" : __instance.gameObject.name) + "; error=" + __exception.GetType().Name);
+                PvpTemporaryCloneFactory.ObserveNativeNpcStartFailed(__instance, __exception);
+            }
             // Diagnostics only: return the original exception unchanged. Never suppress a native
-            // NPC.Start failure for resource-prefab proxies or ordinary game NPCs.
+            // NPC.Start failure for a proxy or ordinary game NPC.
             return __exception;
         }
     }
@@ -1817,6 +1969,22 @@ namespace ErenshorPvP
             // maintenance precondition; live acceptance must prove the current native path stays clean.
             return __exception;
         }
+    }
+
+    [HarmonyPatch(typeof(NPC), "UpdateNav")]
+    internal static class PvpNativeUpdateNavHealthPatch
+    {
+        [HarmonyPrefix]
+        private static void Prefix(NPC __instance)
+        { PvpTemporaryCloneFactory.ObserveNativeNavEntered(__instance); }
+
+        [HarmonyPostfix]
+        private static void Postfix(NPC __instance)
+        { PvpTemporaryCloneFactory.ObserveNativeNavCompleted(__instance); }
+
+        [HarmonyFinalizer]
+        private static Exception Finalizer(NPC __instance, Exception __exception)
+        { return PvpTemporaryCloneFactory.ObserveNativeNavException(__instance, __exception); }
     }
 
     [HarmonyPatch(typeof(NPC), "Update")]

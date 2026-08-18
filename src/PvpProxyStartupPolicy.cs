@@ -1,9 +1,7 @@
 namespace ErenshorPvP
 {
-    // Pure policy for the synthetic combat root. NPC.Start belongs to the borrowed native creature
-    // identity; PvP owns the synthetic proxy's runtime state explicitly and therefore bypasses that
-    // lifecycle only after the object is registered as a temporary PvP actor and its required
-    // component graph is proven coherent.
+    // Pure policy for the synthetic combat root. The cloned NPC receives its own native Start
+    // lifecycle; PvP then reasserts only synthetic identity/reward constraints after Start completes.
     internal static class PvpProxyStartupPolicy
     {
         internal static bool InvariantPasses(bool registered, bool hasNpc, bool hasCharacter, bool hasStats,
@@ -15,11 +13,12 @@ namespace ErenshorPvP
 
         internal static bool ShouldRunNativeNpcStart(bool registeredTemporaryProxy, bool clonedFromLiveStartedNpc)
         {
-            // A clone of a live scene NPC inherits the source component's already-initialized
-            // runtime fields, so replaying the borrowed creature Start lifecycle is both redundant
-            // and unsafe after the object has been converted into a synthetic PvP identity.
-            // Resource-prefab clones have not proven that property and retain their native Start.
-            return !registeredTemporaryProxy || !clonedFromLiveStartedNpc;
+            // 0.5.9 forensic recovery: a cloned MonoBehaviour receives its own Unity lifecycle.
+            // The recent live-good PvP path relied on that native Start after the proxy was enabled
+            // for combat. Bypassing Start forced PvP to reconstruct an incomplete Start-owned nav
+            // graph and caused NavUpdate/UpdateNav to fault. Run native Start for the proxy and
+            // reassert PvP identity/reward state in the Start postfix instead.
+            return true;
         }
 
         // HandleMaintenaceAndCounters dereferences NPC.MyStats every frame and dereferences
@@ -31,10 +30,10 @@ namespace ErenshorPvP
         // sufficient: NameFlash (FlashUIColors) is a DIFFERENT field from the one HandleNameTag
         // dereferences. Verified against the installed Assembly-CSharp.dll, HandleNameTag reads
         // NPC.NamePlateTxt (TMPro.TextMeshPro) through callvirt Behaviour.get_enabled() in every
-        // branch, and also reads NamePlateObject; both are written only by the NPC.Start that a
-        // live-cloned proxy deliberately skips. A proxy missing either would throw on its very first
-        // NPC.Update - before the NeverAggro gate and before all combat AI - so it must fail
-        // preparation instead of reaching Countdown/Active.
+        // branch, and also reads NamePlateObject. The earlier Start-bypass line therefore had to
+        // reconstruct both fields. 0.5.9 restores native Start but keeps this pre/post-Start invariant
+        // so a proxy can never reach NPC.Update with a missing or source-shared nameplate. A proxy
+        // missing either must fail closed instead of reaching combat.
         internal static bool MaintenanceStatePasses(bool registeredTemporaryProxy, bool npcLinksCharacter,
             bool npcLinksStats, bool npcLinksNav, bool npcLinksCaster, bool hasNameFlash, bool raidSlotClear,
             bool hasNamePlateText, bool hasNamePlateObject)

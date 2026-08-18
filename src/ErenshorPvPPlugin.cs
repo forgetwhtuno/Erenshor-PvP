@@ -6,7 +6,7 @@ using UnityEngine.SceneManagement;
 
 namespace ErenshorPvP
 {
-    [LunarisPlugin("forgetwhtuno.erenshor.pvp", "0.5.8", "forgetwhtuno",
+    [LunarisPlugin("forgetwhtuno.erenshor.pvp", "0.5.9", "forgetwhtuno",
         "Standalone MMO-style PvP encounters for Erenshor: consensual arranged challenges and rare wild ambushes against off-map Sim proxies, with real player death/respawn.")]
     [LunarisPermission(LunarisPermission.Reflection | LunarisPermission.Harmony)]
     public sealed class ErenshorPvPPlugin : LunarisPlugin
