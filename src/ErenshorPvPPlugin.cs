@@ -6,12 +6,14 @@ using UnityEngine.SceneManagement;
 
 namespace ErenshorPvP
 {
-    [LunarisPlugin("forgetwhtuno.erenshor.pvp", "0.5.4", "forgetwhtuno",
+    [LunarisPlugin("forgetwhtuno.erenshor.pvp", "0.5.8", "forgetwhtuno",
         "Standalone MMO-style PvP encounters for Erenshor: consensual arranged challenges and rare wild ambushes against off-map Sim proxies, with real player death/respawn.")]
     [LunarisPermission(LunarisPermission.Reflection | LunarisPermission.Harmony)]
     public sealed class ErenshorPvPPlugin : LunarisPlugin
     {
         private Harmony _harmony;
+        private bool _runtimeHooksReady;
+        private string _runtimeHookFailure = string.Empty;
         private PvpSettings _settings;
         private PvpSuiteAuraProvider _auraProvider;
 
@@ -23,9 +25,25 @@ namespace ErenshorPvP
             PvpController.SaveSettings = delegate { try { Config.Save(); } catch { } };
             PvpController.Initialize(_settings);
             _harmony = new Harmony("forgetwhtuno.erenshor.pvp");
-            _harmony.PatchAll();
-            SceneManager.sceneLoaded += OnSceneLoaded;
-            SceneManager.sceneUnloaded += OnSceneUnloaded;
+            try
+            {
+                _harmony.PatchAll();
+                _runtimeHooksReady = true;
+                _runtimeHookFailure = string.Empty;
+            }
+            catch (Exception ex)
+            {
+                _runtimeHooksReady = false;
+                _runtimeHookFailure = ex.GetType().Name;
+                try { _harmony.UnpatchSelf(); } catch { }
+                Logging.LogError("Erenshor PvP runtime hooks unavailable (" + _runtimeHookFailure + "). PvP encounters are disabled, but the retained status UI will remain available.");
+            }
+            PvpController.RuntimeHooksAvailable = _runtimeHooksReady;
+            if (_runtimeHooksReady)
+            {
+                SceneManager.sceneLoaded += OnSceneLoaded;
+                SceneManager.sceneUnloaded += OnSceneUnloaded;
+            }
 
             // Optional Suite Hub transport adapter. Never assumed present; registration failure
             // must never block normal standalone PvP.
@@ -37,8 +55,29 @@ namespace ErenshorPvP
             }
             catch (Exception ex) { Logging.LogError("PvP Suite Aura provider setup failed: " + ex); }
 
-            Logging.LogInfo("Erenshor PvP 0.5.4 loaded. Disabled by default; use the retained PvP panel (or /epvp compatibility commands) to opt in.");
-            Logging.LogInfo("PvP runtime marker: plugin_identity=ErenshorPvP; revision=pvp-0.5.4-maintenance-r2");
+            // Derived from the LunarisPlugin attribute so the startup banner can never drift from the
+            // actual build again. A hardcoded literal here previously reported "0.5.4" while the running
+            // assembly was 0.5.5, which made the startup line useless for confirming which DLL loaded -
+            // exactly the check live acceptance depends on.
+            Logging.LogInfo("Erenshor PvP " + ResolvePluginVersion() + " loaded. Disabled by default; use the retained PvP panel (or /epvp compatibility commands) to opt in.");
+            Logging.LogInfo("PvP runtime marker: plugin_identity=ErenshorPvP; revision=pvp-" + ResolvePluginVersion() + "-world-combat-r2");
+        }
+
+        internal bool RuntimeHooksReady { get { return _runtimeHooksReady; } }
+        internal string RuntimeHookFailure { get { return _runtimeHookFailure; } }
+
+        // Single source of truth for the displayed version: the LunarisPlugin attribute this class is
+        // decorated with. Falls back to "unknown" rather than a stale literal if it cannot be read.
+        internal static string ResolvePluginVersion()
+        {
+            try
+            {
+                LunarisPluginAttribute attr = Attribute.GetCustomAttribute(
+                    typeof(ErenshorPvPPlugin), typeof(LunarisPluginAttribute)) as LunarisPluginAttribute;
+                if (attr != null && !string.IsNullOrEmpty(attr.Version)) return attr.Version;
+            }
+            catch { }
+            return "unknown";
         }
 
         private void Update()
@@ -54,6 +93,7 @@ namespace ErenshorPvP
             try { if (_auraProvider != null) _auraProvider.Unregister(); } catch { }
             _auraProvider = null;
             PvpController.SuiteBridgeRegistered = false;
+            PvpController.RuntimeHooksAvailable = false;
             PvpController.Shutdown();
             PvpController.SaveSettings = null;
             ErenshorPvPPluginHolder.Instance = null;

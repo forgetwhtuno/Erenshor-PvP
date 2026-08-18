@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using HarmonyLib;
+using TMPro;
 using UnityEngine;
 using UnityEngine.AI;
 
@@ -25,10 +26,18 @@ namespace ErenshorPvP
         private static readonly Dictionary<int, int> EligibleCombatSpellCounts = new Dictionary<int, int>();
         private static readonly Dictionary<int, int> EligibleHealSpellCounts = new Dictionary<int, int>();
         private static readonly Dictionary<int, int> AttackDecisionCounts = new Dictionary<int, int>();
+        private static readonly HashSet<int> AttackSkillDecisionLogged = new HashSet<int>();
+        private static readonly HashSet<int> AttackSpellDecisionLogged = new HashSet<int>();
         private static readonly Dictionary<int, int> HealCheckCounts = new Dictionary<int, int>();
         private static readonly Dictionary<int, int> SpellStartCounts = new Dictionary<int, int>();
         private static readonly Dictionary<int, int> LastSpellStartFrame = new Dictionary<int, int>();
         private static readonly HashSet<int> NativeStartBypassEligible = new HashSet<int>();
+        private static readonly HashSet<int> NativeUpdateReached = new HashSet<int>();
+        private static readonly HashSet<int> CombatSectionReached = new HashSet<int>();
+        private static readonly HashSet<int> LegalTargetAcquired = new HashSet<int>();
+        private static readonly HashSet<int> NavPursuitRequested = new HashSet<int>();
+        private static readonly Dictionary<int, int> MeleeAttemptCounts = new Dictionary<int, int>();
+        private static readonly HashSet<int> NativeUpdateExceptionLogged = new HashSet<int>();
         private static bool _runtimeInvalidCleanupQueued;
         private static string _runtimeInvalidReason = string.Empty;
         private static float _despawnAt;
@@ -36,8 +45,9 @@ namespace ErenshorPvP
         private static PvpEncounterMode _activeMode = PvpEncounterMode.Arranged;
         private static string _activeMotive = string.Empty;
         private static string _templateSource = "none";
-        private const float PlayerNpcClearance = 10f;
-        private const float SpawnNpcClearance = 8f;
+        private const float PlayerProtectedClearance = 10f;
+        private const float SpawnProtectedClearance = 8f;
+        private const float SpawnActorCollisionClearance = 1.5f;
         private const float FormationDistance = 11f;
 
         internal static bool SuppressPersistentLoad { get { return _suppressPersistentLoad; } }
@@ -131,7 +141,7 @@ namespace ErenshorPvP
                     npc.ThisSim = null;
                     npc.SimPlayer = false;
                     npc.InGroup = false;
-                    npc.NeverAggro = false;
+                    npc.NeverAggro = true;
                     ApplyProfileLoadout(npc, profile);
                     npc.enabled = false;
                 }
@@ -150,6 +160,14 @@ namespace ErenshorPvP
                 if (nav != null) nav.enabled = false;
 
                 ConfigureNativeMaintenanceState(npc, actor, spells, nav);
+                if (npc != null && (_templateSource ?? string.Empty).StartsWith("live:", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Runtime IEnumerator fields copied from a live template are not proof that a
+                    // coroutine is scheduled on this clone. The proxy bypasses NPC.Start, so discard
+                    // any borrowed handles now and establish fresh native nav/behavior coroutines at GO.
+                    TrySetField(npc, "navDo", null);
+                    TrySetField(npc, "behDo", null);
+                }
 
                 if (profile != null) AttachSimVisualShell(clone, profile);
                 try
@@ -204,15 +222,16 @@ namespace ErenshorPvP
             Character player = GameData.PlayerControl == null ? null : GameData.PlayerControl.Myself;
             if (player == null) { reason = "player state is unavailable"; return false; }
             memberCount = Math.Max(1, Math.Min(5, memberCount));
-            List<Character> outsiders = OutsideNpcActors(player);
-            Character nearest = outsiders.OrderBy(x => (x.transform.position - player.transform.position).sqrMagnitude).FirstOrDefault();
+            List<Character> worldActors = OutsideNpcActors(player);
+            List<Character> protectedActors = worldActors.Where(PvpCombatContainment.IsProtectedWorldActor).ToList();
+            Character nearest = protectedActors.OrderBy(x => (x.transform.position - player.transform.position).sqrMagnitude).FirstOrDefault();
             if (nearest != null)
             {
                 float nearestDistance = Vector3.Distance(nearest.transform.position, player.transform.position);
-                if (!MeetsClearance(nearestDistance, PlayerNpcClearance))
+                if (!MeetsClearance(nearestDistance, PlayerProtectedClearance))
                 {
-                    reason = "move away from " + ActorName(nearest) + " (" + nearestDistance.ToString("0.0") + "m; need " + PlayerNpcClearance.ToString("0") + "m clearance)";
-                    PvpDiagnostics.Log("spawn_clearance blocked=near_player; npc=" + ActorName(nearest) + "; distance=" + nearestDistance.ToString("0.0"));
+                    reason = "move away from protected world actor " + ActorName(nearest) + " (" + nearestDistance.ToString("0.0") + "m; need " + PlayerProtectedClearance.ToString("0") + "m clearance)";
+                    PvpDiagnostics.Log("spawn_clearance blocked=protected_near_player; npc=" + ActorName(nearest) + "; distance=" + nearestDistance.ToString("0.0"));
                     return false;
                 }
             }
@@ -239,7 +258,8 @@ namespace ErenshorPvP
                     Vector3 intended = player.transform.position + directions[d] * FormationDistance + right * lateral;
                     NavMeshHit hit;
                     if (!NavMesh.SamplePosition(intended, out hit, 3f, NavMesh.AllAreas) ||
-                        outsiders.Any(x => !MeetsClearance(Vector3.Distance(x.transform.position, hit.position), SpawnNpcClearance)))
+                        protectedActors.Any(x => !MeetsClearance(Vector3.Distance(x.transform.position, hit.position), SpawnProtectedClearance)) ||
+                        worldActors.Any(x => !MeetsClearance(Vector3.Distance(x.transform.position, hit.position), SpawnActorCollisionClearance)))
                     { valid = false; break; }
                     NavMeshPath path = new NavMeshPath();
                     if (!NavMesh.CalculatePath(hit.position, playerHit.position, NavMesh.AllAreas, path) || path.status != NavMeshPathStatus.PathComplete)
@@ -248,11 +268,12 @@ namespace ErenshorPvP
                 }
                 if (!valid || candidate.Count != memberCount) continue;
                 positions = candidate; reason = string.Empty;
-                PvpDiagnostics.Log("spawn_clearance pass members=" + memberCount + "; player_npc_clearance=" + PlayerNpcClearance +
-                    "; spawn_npc_clearance=" + SpawnNpcClearance + "; formation_distance=" + FormationDistance);
+                PvpDiagnostics.Log("spawn_clearance pass members=" + memberCount + "; player_protected_clearance=" + PlayerProtectedClearance +
+                    "; spawn_protected_clearance=" + SpawnProtectedClearance + "; spawn_actor_collision_clearance=" + SpawnActorCollisionClearance +
+                    "; world_actors=" + worldActors.Count + "; protected_actors=" + protectedActors.Count + "; formation_distance=" + FormationDistance);
                 return true;
             }
-            PvpDiagnostics.Log("spawn_clearance blocked=no_formation; outsiders=" + outsiders.Count + "; members=" + memberCount);
+            PvpDiagnostics.Log("spawn_clearance blocked=no_formation; world_actors=" + worldActors.Count + "; protected_actors=" + protectedActors.Count + "; members=" + memberCount);
             return false;
         }
 
@@ -317,10 +338,12 @@ namespace ErenshorPvP
 
         internal static string RunSpawnPolicySelfTests()
         {
-            if (MeetsClearance(9.99f, PlayerNpcClearance)) return "FAIL spawn player clearance";
-            if (!MeetsClearance(PlayerNpcClearance, PlayerNpcClearance)) return "FAIL spawn player boundary";
-            if (MeetsClearance(7.99f, SpawnNpcClearance)) return "FAIL spawn member clearance";
-            if (!MeetsClearance(SpawnNpcClearance, SpawnNpcClearance)) return "FAIL spawn member boundary";
+            if (MeetsClearance(9.99f, PlayerProtectedClearance)) return "FAIL protected player clearance";
+            if (!MeetsClearance(PlayerProtectedClearance, PlayerProtectedClearance)) return "FAIL protected player boundary";
+            if (MeetsClearance(7.99f, SpawnProtectedClearance)) return "FAIL protected spawn clearance";
+            if (!MeetsClearance(SpawnProtectedClearance, SpawnProtectedClearance)) return "FAIL protected spawn boundary";
+            if (MeetsClearance(1.49f, SpawnActorCollisionClearance)) return "FAIL world actor collision clearance";
+            if (!MeetsClearance(SpawnActorCollisionClearance, SpawnActorCollisionClearance)) return "FAIL world actor collision boundary";
             return "PASS pvp spawn clearance";
         }
 
@@ -359,12 +382,20 @@ namespace ErenshorPvP
                 EligibleCombatSpellCounts.Remove(member.GetInstanceID());
                 EligibleHealSpellCounts.Remove(member.GetInstanceID());
                 AttackDecisionCounts.Remove(member.GetInstanceID());
+                AttackSkillDecisionLogged.Remove(member.GetInstanceID());
+                AttackSpellDecisionLogged.Remove(member.GetInstanceID());
                 HealCheckCounts.Remove(member.GetInstanceID());
                 SpellStartCounts.Remove(member.GetInstanceID());
                 NativeStartBypassEligible.Remove(member.GetInstanceID());
+                NativeUpdateReached.Remove(member.GetInstanceID());
+                CombatSectionReached.Remove(member.GetInstanceID());
+                LegalTargetAcquired.Remove(member.GetInstanceID());
+                NavPursuitRequested.Remove(member.GetInstanceID());
+                MeleeAttemptCounts.Remove(member.GetInstanceID());
+                NativeUpdateExceptionLogged.Remove(member.GetInstanceID());
                 try { UnityEngine.Object.Destroy(member); } catch { }
             }
-            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); EligibleHealSpellCounts.Clear(); AttackDecisionCounts.Clear(); HealCheckCounts.Clear(); SpellStartCounts.Clear(); LastSpellStartFrame.Clear(); NativeStartBypassEligible.Clear(); _runtimeInvalidCleanupQueued = false; _runtimeInvalidReason = string.Empty; DestroyTemporarySpells();
+            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); EligibleHealSpellCounts.Clear(); AttackDecisionCounts.Clear(); AttackSkillDecisionLogged.Clear(); AttackSpellDecisionLogged.Clear(); HealCheckCounts.Clear(); SpellStartCounts.Clear(); LastSpellStartFrame.Clear(); NativeStartBypassEligible.Clear(); NativeUpdateReached.Clear(); CombatSectionReached.Clear(); LegalTargetAcquired.Clear(); NavPursuitRequested.Clear(); MeleeAttemptCounts.Clear(); NativeUpdateExceptionLogged.Clear(); _runtimeInvalidCleanupQueued = false; _runtimeInvalidReason = string.Empty; DestroyTemporarySpells();
             ErenshorPvpEvents.Publish(new PvpSemanticEvent("pvp_proxy_despawned", string.Empty, "PvP Proxy",
                 string.Empty, "cleanup", reason ?? "manual"));
             PvpController.EncounterCleaned();
@@ -452,6 +483,7 @@ namespace ErenshorPvP
                 TrySetField(npc, "MyNav", nav);
                 TrySetField(npc, "MyCharControl", npc.GetComponent<CharacterController>());
                 TrySetField(npc, "MyRaidSlot", null);
+                EnsureNamePlatePresentation(npc, actor);
                 object currentFlash;
                 if (!TryReadField(npc, "NameFlash", out currentFlash) || currentFlash == null)
                 {
@@ -469,10 +501,200 @@ namespace ErenshorPvP
             catch { }
         }
 
+        // NPC.Update calls HandleNameTag() as its THIRD statement - before the NeverAggro early-out and
+        // before every combat call - and HandleNameTag dereferences NPC.NamePlateTxt (TMPro.TextMeshPro)
+        // via callvirt Behaviour.get_enabled() in every branch. NPC.Update has no exception handler, so a
+        // null NamePlateTxt throws every frame and the whole combat/aggro/nav half of Update never runs.
+        //
+        // Verified against the installed Assembly-CSharp.dll: NamePlateTxt and NamePlateObject are written
+        // by NPC.Start and by nothing else, and read by HandleNameTag (NamePlateObject also by Start).
+        // PvpProxyStartupPolicy.ShouldRunNativeNpcStart deliberately suppresses that Start for a live-cloned
+        // proxy, and ConfigureNativeMaintenanceState restored the other Start-owned references but not these
+        // two - which is the whole reason the 5v5 attackers stood still and dealt zero damage.
+        //
+        // Native Start's recipe (IL_0475-0682) is reproduced here in the same order:
+        //   NamePlate       = Instantiate(GameData.GM.GetComponent<Misc>().NamePlate, pos, rot).transform
+        //   NamePlateTxt    = NamePlate.GetComponent<TextMeshPro>()
+        //   NamePlateObject = NamePlate.GetComponent<NamePlate>()
+        //   NamePlateObject.MyStats / .Myself = this NPC's Stats / Character
+        //   NamePlate text  = NPCName
+        //   NamePlate.SetParent(transform)
+        // Preference order is reuse-then-rebuild so a clone that already carries a valid nameplate keeps it.
+        private static void EnsureNamePlatePresentation(NPC npc, Character actor)
+        {
+            if (npc == null) return;
+            try
+            {
+                Transform plate = npc.NamePlate;
+
+                // (a)/(b) Reuse the clone's OWN nameplate when it survived cloning. A component that is not
+                // under this proxy's transform belongs to the source/template NPC: binding it would make two
+                // NPCs share one nameplate and mutate the live original, so it is rejected here.
+                if (plate != null && !IsUnderProxyRoot(npc, plate)) plate = null;
+                if (plate == null)
+                {
+                    TextMeshPro owned = FindOwnNamePlateText(npc);
+                    if (owned != null) plate = owned.transform;
+                }
+
+                // (c) The clone genuinely has no nameplate presentation. Build the native equivalent from the
+                // same prefab NPC.Start uses, so HandleNameTag sees exactly the shape it expects.
+                if (plate == null) plate = InstantiateNativeNamePlate(npc);
+                if (plate == null) return; // validation below fails the proxy; preparation must not continue.
+
+                TrySetField(npc, "NamePlate", plate);
+                TextMeshPro text = plate.GetComponent<TextMeshPro>();
+                if (text == null) text = plate.GetComponentInChildren<TextMeshPro>(true);
+                TrySetField(npc, "NamePlateTxt", text);
+
+                NamePlate plateComponent = plate.GetComponent<NamePlate>();
+                if (plateComponent == null) plateComponent = plate.GetComponentInChildren<NamePlate>(true);
+                if (plateComponent != null)
+                {
+                    TrySetField(npc, "NamePlateObject", plateComponent);
+                    // Start binds the nameplate back to its owner's live stats/character. Without this the
+                    // plate would report the template creature instead of the proxy.
+                    TrySetField(plateComponent, "MyStats", actor == null ? null : actor.MyStats);
+                    TrySetField(plateComponent, "Myself", actor);
+                }
+
+                if (text != null && !string.IsNullOrEmpty(npc.NPCName)) text = ApplyNamePlateText(text, npc.NPCName);
+                if (plate.parent != npc.transform) plate.SetParent(npc.transform);
+            }
+            catch { }
+        }
+
+        // SECOND half of the bypassed-Start problem. Repairing NamePlateTxt fixed NPC.Update, but the
+        // actual combat AI does not live in Update at all. Verified against the installed
+        // Assembly-CSharp.dll, the decision chain is:
+        //
+        //   NPC.BehaviorUpdate(0.1f)  [coroutine]  -> DoNonRaidBehavior / DoRaidBehavior
+        //        -> Combat -> DoAttackSpell / DoAttackSkill / PerformMeleeHit
+        //        -> CheckHeals / CheckBuffs
+        //
+        // and NPC.Start is the only place that launches it (IL_07AA-07F4):
+        //
+        //   if (!NeverAggro) { navDo = NavUpdate(0.3f); StartCoroutine(navDo); }
+        //   behDo = BehaviorUpdate(0.1f); StartCoroutine(behDo);
+        //
+        // Because a live-cloned proxy deliberately skips Start, neither coroutine was ever started, so
+        // the proxy could hold a valid forced aggro target and still never evaluate a single attack,
+        // spell, or heal. That is the residual "attackers stand still" behaviour that survived the
+        // nameplate fix (damage_to_defenders=0 / attack_spell_decisions=0 / heal_checks=0 with zero NREs).
+        //
+        // Started at combat activation rather than at spawn so proxies stay inert while preparing, and
+        // idempotent so a proxy can never run two behaviour coroutines.
+        internal static bool EnsureNativeBehaviorCoroutines(NPC npc)
+        {
+            if (npc == null || !IsTemporaryNpc(npc)) return false;
+            try
+            {
+                if (!npc.isActiveAndEnabled) return false;
+
+                // Native Start owns these independently: with NeverAggro=true it can have behDo
+                // resident while navDo is still null. Never treat one handle as proof of the other.
+                object existingNav;
+                bool navRunning = TryReadField(npc, "navDo", out existingNav) && existingNav != null;
+                if (!npc.NeverAggro && !navRunning)
+                {
+                    object navEnumerator = InvokeCoroutineBody(npc, "NavUpdate", 0.3f);
+                    if (navEnumerator is System.Collections.IEnumerator)
+                    {
+                        TrySetField(npc, "navDo", navEnumerator);
+                        npc.StartCoroutine((System.Collections.IEnumerator)navEnumerator);
+                        navRunning = true;
+                    }
+                }
+
+                object existingBeh;
+                bool behaviorRunning = TryReadField(npc, "behDo", out existingBeh) && existingBeh != null;
+                if (!behaviorRunning)
+                {
+                    object behEnumerator = InvokeCoroutineBody(npc, "BehaviorUpdate", 0.1f);
+                    if (behEnumerator is System.Collections.IEnumerator)
+                    {
+                        TrySetField(npc, "behDo", behEnumerator);
+                        npc.StartCoroutine((System.Collections.IEnumerator)behEnumerator);
+                        behaviorRunning = true;
+                    }
+                }
+                return behaviorRunning && (npc.NeverAggro || navRunning);
+            }
+            catch { return false; }
+        }
+
+        private static object InvokeCoroutineBody(NPC npc, string methodName, float waitSeconds)
+        {
+            try
+            {
+                MethodInfo method = AccessTools.Method(typeof(NPC), methodName, new Type[] { typeof(float) });
+                if (method == null) return null;
+                return method.Invoke(npc, new object[] { waitSeconds });
+            }
+            catch { return null; }
+        }
+
+        // Proof for telemetry/validation that the behaviour coroutine is actually resident.
+        internal static bool HasNativeBehaviorCoroutine(NPC npc)
+        {
+            object value;
+            return npc != null && TryReadField(npc, "behDo", out value) && value != null;
+        }
+
+        internal static bool HasNativeNavCoroutine(NPC npc)
+        {
+            object value;
+            return npc != null && TryReadField(npc, "navDo", out value) && value != null;
+        }
+
+        private static TextMeshPro ApplyNamePlateText(TextMeshPro text, string value)
+        {
+            try { text.text = value; } catch { }
+            return text;
+        }
+
+        private static bool IsUnderProxyRoot(NPC npc, Transform candidate)
+        {
+            if (npc == null || candidate == null) return false;
+            Transform root = npc.transform;
+            for (Transform t = candidate; t != null; t = t.parent) if (t == root) return true;
+            return false;
+        }
+
+        // Only ever returns a TextMeshPro that lives inside this proxy's own hierarchy.
+        private static TextMeshPro FindOwnNamePlateText(NPC npc)
+        {
+            if (npc == null) return null;
+            TextMeshPro[] candidates = npc.GetComponentsInChildren<TextMeshPro>(true);
+            for (int i = 0; i < candidates.Length; i++)
+            {
+                TextMeshPro candidate = candidates[i];
+                if (candidate != null && IsUnderProxyRoot(npc, candidate.transform)) return candidate;
+            }
+            return null;
+        }
+
+        private static Transform InstantiateNativeNamePlate(NPC npc)
+        {
+            try
+            {
+                if (GameData.GM == null) return null;
+                Misc misc = GameData.GM.GetComponent<Misc>();
+                if (misc == null || misc.NamePlate == null) return null;
+                GameObject spawned = UnityEngine.Object.Instantiate(misc.NamePlate,
+                    npc.transform.position, npc.transform.rotation);
+                if (spawned == null) return null;
+                spawned.name = "PvP_NamePlate_" + (string.IsNullOrEmpty(npc.NPCName) ? "proxy" : npc.NPCName);
+                return spawned.transform;
+            }
+            catch { return null; }
+        }
+
         private static bool ValidateNativeMaintenanceState(NPC npc, Character actor, Stats stats,
             CastSpell caster, NavMeshAgent nav, out string reason)
         {
             bool self = false, boundStats = false, boundNav = false, boundCaster = false, flash = false, raidClear = false;
+            bool plateText = false, plateObject = false;
             try
             {
                 object value;
@@ -482,12 +704,19 @@ namespace ErenshorPvP
                 boundCaster = npc != null && TryReadField(npc, "MySpells", out value) && object.ReferenceEquals(value, caster);
                 flash = npc != null && TryReadField(npc, "NameFlash", out value) && value != null;
                 raidClear = npc != null && TryReadField(npc, "MyRaidSlot", out value) && value == null;
+                // The exact two references NPC.HandleNameTag dereferences on its first Update. Compared
+                // against Unity's null (not just a C# reference check) so a destroyed nameplate also fails.
+                plateText = npc != null && TryReadField(npc, "NamePlateTxt", out value) &&
+                            value is TextMeshPro && (TextMeshPro)value != null;
+                plateObject = npc != null && TryReadField(npc, "NamePlateObject", out value) &&
+                              value is NamePlate && (NamePlate)value != null;
             }
             catch { }
             bool pass = PvpProxyStartupPolicy.MaintenanceStatePasses(npc != null && TeamClones.Contains(npc.gameObject),
-                self, boundStats, boundNav, boundCaster, flash, raidClear);
+                self, boundStats, boundNav, boundCaster, flash, raidClear, plateText, plateObject);
             reason = pass ? "pass" : "self=" + self + ",stats=" + boundStats + ",nav=" + boundNav +
-                ",caster=" + boundCaster + ",nameFlash=" + flash + ",raidSlotClear=" + raidClear;
+                ",caster=" + boundCaster + ",nameFlash=" + flash + ",raidSlotClear=" + raidClear +
+                ",namePlateTxt=" + plateText + ",namePlateObject=" + plateObject;
             return pass;
         }
 
@@ -567,14 +796,94 @@ namespace ErenshorPvP
             return pass;
         }
 
-        internal static void ObserveAttackDecision(NPC npc)
+        internal static void ObserveNativeUpdate(NPC npc)
         {
-            if (!IsTemporaryNpc(npc)) return; Increment(AttackDecisionCounts, npc.gameObject.GetInstanceID());
+            if (!IsTemporaryNpc(npc) || !PvpCombatContainment.LethalFightActive || npc.NeverAggro) return;
+            int id = npc.gameObject.GetInstanceID();
+            if (NativeUpdateReached.Add(id))
+                PvpDiagnostics.Log("native_update_reached proxy=" + SafeProxyName(npc) + "; neverAggro=false");
+        }
+
+        internal static void ObserveNativeUpdateCompleted(NPC npc)
+        {
+            if (!IsTemporaryNpc(npc) || !PvpCombatContainment.LethalFightActive || npc.NeverAggro) return;
+            int id = npc.gameObject.GetInstanceID();
+            Character target = null;
+            try { target = npc.CurrentAggroTarget; } catch { }
+            if (target != null && PvpCombatContainment.IsProtectedWorldActor(target))
+            {
+                PvpDiagnostics.Log("protected_target_cleared proxy=" + SafeProxyName(npc) + "; target=" + PvpCombatContainment.DescribeCombatTarget(target));
+                try { npc.ForceAggroOn(null); } catch { }
+                return;
+            }
+            if (target != null && PvpCombatContainment.IsPermittedProxyTarget(target) && LegalTargetAcquired.Add(id))
+                PvpDiagnostics.Log("legal_target_acquired proxy=" + SafeProxyName(npc) + "; target=" + PvpCombatContainment.DescribeCombatTarget(target));
+
+            try
+            {
+                NavMeshAgent nav = npc.GetComponent<NavMeshAgent>();
+                if (nav != null && nav.enabled && nav.isOnNavMesh && nav.hasPath && NavPursuitRequested.Add(id))
+                    PvpDiagnostics.Log("nav_pursuit_requested proxy=" + SafeProxyName(npc) + "; target=" + PvpCombatContainment.DescribeCombatTarget(target));
+            }
+            catch { }
+        }
+
+        internal static Exception ObserveNativeUpdateException(NPC npc, Exception exception)
+        {
+            if (exception == null || !IsTemporaryNpc(npc)) return exception;
+            int id = npc.gameObject.GetInstanceID();
+            if (NativeUpdateExceptionLogged.Add(id))
+                PvpDiagnostics.Log("native_npc_exception method=NPC.Update; proxy=" + SafeProxyName(npc) +
+                    "; type=" + exception.GetType().Name + "; message=" + (exception.Message ?? string.Empty));
+            return exception; // diagnostics never suppress native failures.
+        }
+
+        internal static void ObserveCombatSection(NPC npc)
+        {
+            if (!IsTemporaryNpc(npc) || !PvpCombatContainment.LethalFightActive || npc.NeverAggro) return;
+            int id = npc.gameObject.GetInstanceID();
+            if (CombatSectionReached.Add(id))
+                PvpDiagnostics.Log("combat_section_reached proxy=" + SafeProxyName(npc));
+        }
+
+        internal static void ObserveMeleeAttempt(NPC npc)
+        {
+            if (!IsTemporaryNpc(npc) || !PvpCombatContainment.LethalFightActive || npc.NeverAggro) return;
+            int id = npc.gameObject.GetInstanceID();
+            int before; MeleeAttemptCounts.TryGetValue(id, out before);
+            Increment(MeleeAttemptCounts, id);
+            if (before == 0)
+            {
+                PvpDiagnostics.Log("melee_decision proxy=" + SafeProxyName(npc));
+                PvpDiagnostics.Log("melee_attempt proxy=" + SafeProxyName(npc));
+            }
+        }
+
+        internal static void ObserveAttackDecision(NPC npc, bool spellDecision)
+        {
+            if (!IsTemporaryNpc(npc) || !PvpCombatContainment.LethalFightActive || npc.NeverAggro) return;
+            int id = npc.gameObject.GetInstanceID();
+            Increment(AttackDecisionCounts, id);
+            HashSet<int> logged = spellDecision ? AttackSpellDecisionLogged : AttackSkillDecisionLogged;
+            if (logged.Add(id))
+                PvpDiagnostics.Log((spellDecision ? "attack_spell_decision" : "attack_skill_decision") +
+                    " proxy=" + SafeProxyName(npc));
         }
 
         internal static void ObserveHealCheck(NPC npc)
         {
-            if (!IsTemporaryNpc(npc)) return; Increment(HealCheckCounts, npc.gameObject.GetInstanceID());
+            if (!IsTemporaryNpc(npc) || !PvpCombatContainment.LethalFightActive) return;
+            int id = npc.gameObject.GetInstanceID();
+            int before; HealCheckCounts.TryGetValue(id, out before);
+            Increment(HealCheckCounts, id);
+            if (before == 0) PvpDiagnostics.Log("heal_check proxy=" + SafeProxyName(npc));
+        }
+
+        internal static bool ObserveAndAllowSpellStart(CastSpell caster, Spell spell, Stats target)
+        {
+            if (!PvpCombatContainment.AllowSpellStart(caster, spell, target)) return false;
+            ObserveSpellStart(caster, spell);
+            return true;
         }
 
         internal static void ObserveSpellStart(CastSpell caster, Spell spell)
@@ -588,7 +897,38 @@ namespace ErenshorPvP
             int frame = Time.frameCount, previous;
             if (LastSpellStartFrame.TryGetValue(key, out previous) && previous == frame) return;
             LastSpellStartFrame[key] = frame;
+            int before; SpellStartCounts.TryGetValue(actorId, out before);
             Increment(SpellStartCounts, actorId);
+            if (before == 0) PvpDiagnostics.Log("spell_start proxy=" + (actor.MyStats == null ? actor.name : actor.MyStats.MyName) +
+                "; spell=" + (spell == null ? "unknown" : spell.SpellName));
+        }
+
+        internal static bool HasAnyNativeCombatEvidence()
+        {
+            for (int i = 0; i < TeamClones.Count; i++)
+            {
+                GameObject go = TeamClones[i]; if (go == null) continue;
+                int id = go.GetInstanceID();
+                int attacks = 0, melee = 0, heals = 0, casts = 0;
+                AttackDecisionCounts.TryGetValue(id, out attacks);
+                MeleeAttemptCounts.TryGetValue(id, out melee);
+                HealCheckCounts.TryGetValue(id, out heals);
+                SpellStartCounts.TryGetValue(id, out casts);
+                bool nativeUpdate = NativeUpdateReached.Contains(id);
+                bool legalTarget = LegalTargetAcquired.Contains(id);
+                bool combatDecision = attacks > 0 || melee > 0;
+                if (PvpCombatStartupPolicy.HasCombatEvidence(nativeUpdate, legalTarget,
+                    NavPursuitRequested.Contains(id), combatDecision, heals > 0, casts > 0, false, false))
+                    return true;
+            }
+            return false;
+        }
+
+        internal static string NativeCombatEvidenceSummary()
+        {
+            return "native_updates=" + NativeUpdateReached.Count + "; combat_sections=" + CombatSectionReached.Count +
+                "; legal_targets=" + LegalTargetAcquired.Count + "; nav_pursuit=" + NavPursuitRequested.Count +
+                "; melee_attempts=" + MeleeAttemptCounts.Values.Sum() + "; " + BalanceRuntimeSummary();
         }
 
         private static void Increment(Dictionary<int, int> map, int id)
@@ -635,6 +975,69 @@ namespace ErenshorPvP
         {
             if (_clone == null) return "[Erenshor PvP] Spawn a temporary clone first: /epvp spawnclone";
             return PvpCombatContainment.BeginTargetingTest(_clone.GetComponent<NPC>(), _clone.GetComponent<Character>());
+        }
+
+        internal static bool PrepareForCountdown(out string reason)
+        {
+            reason = string.Empty;
+            if (_clone == null || TeamClones.Count == 0) { reason = "no_active_team"; return false; }
+            for (int i = 0; i < TeamClones.Count; i++)
+            {
+                GameObject member = TeamClones[i];
+                string invariant;
+                if (!ValidateProxyStartupInvariant(member, out invariant))
+                {
+                    reason = "proxy" + (i + 1) + "_startup:" + invariant;
+                    return false;
+                }
+                Character actor = member == null ? null : member.GetComponent<Character>();
+                NPC npc = member == null ? null : member.GetComponent<NPC>();
+                CastSpell caster = member == null ? null : member.GetComponent<CastSpell>();
+                NavMeshAgent nav = member == null ? null : member.GetComponent<NavMeshAgent>();
+                SuppressBorrowedDeathRewards(actor);
+                string rewardInvariant;
+                if (!ValidateProxyRewardBoundary(member, out rewardInvariant))
+                {
+                    reason = "proxy" + (i + 1) + "_reward:" + rewardInvariant;
+                    return false;
+                }
+
+                // Countdown is a real native-maintenance phase, not combat. Keep NPC.Update and
+                // presentation alive so any runtime invariant failure surfaces before GO, while
+                // NeverAggro, disabled spell casting, and the disabled NavMeshAgent prevent the
+                // temporary opponent from beginning combat early.
+                if (npc != null) { npc.NeverAggro = true; npc.enabled = true; }
+                if (actor != null) actor.enabled = true;
+                if (caster != null) caster.enabled = false;
+                if (nav != null) nav.enabled = false;
+                PvpDiagnostics.Log("proxy_prepared proxy=" + (i + 1) + "; neverAggro=" +
+                    (npc == null ? "missing" : npc.NeverAggro.ToString().ToLowerInvariant()) +
+                    "; spells_enabled=" + (caster != null && caster.enabled) + "; nav_enabled=" + (nav != null && nav.enabled));
+            }
+            return true;
+        }
+
+        internal static bool MaintainCountdownHold(out string reason)
+        {
+            reason = string.Empty;
+            if (TeamClones.Count == 0) { reason = "no_active_team"; return false; }
+            for (int i = 0; i < TeamClones.Count; i++)
+            {
+                GameObject member = TeamClones[i];
+                NPC npc = member == null ? null : member.GetComponent<NPC>();
+                CastSpell caster = member == null ? null : member.GetComponent<CastSpell>();
+                NavMeshAgent nav = member == null ? null : member.GetComponent<NavMeshAgent>();
+                if (npc == null) { reason = "proxy" + (i + 1) + "_npc_missing"; return false; }
+                npc.NeverAggro = true;
+                if (caster != null) caster.enabled = false;
+                try { if (nav != null) nav.enabled = false; } catch { }
+                if (!npc.NeverAggro || (caster != null && caster.enabled) || (nav != null && nav.enabled))
+                {
+                    reason = "proxy" + (i + 1) + "_hold_failed";
+                    return false;
+                }
+            }
+            return true;
         }
 
         internal static string BeginLethalFight()
@@ -783,7 +1186,7 @@ namespace ErenshorPvP
                 Character actor = go.GetComponent<Character>(); NPC npc = go.GetComponent<NPC>();
                 if (actor == null || actor.MyStats == null || actor.MyStats.CurrentMaxHP <= 0) failures.Add("proxy" + (i + 1) + "_hp");
                 if (npc == null || npc.SimPlayer || npc.ThisSim != null) failures.Add("proxy" + (i + 1) + "_identity");
-                else if (!npc.NoSelfHeal) failures.Add("proxy" + (i + 1) + "_self_heal");
+                else if (npc.NoSelfHeal) failures.Add("proxy" + (i + 1) + "_self_heal_blocked");
                 Transform visual = null;
                 foreach (Transform child in go.transform) if (child != null && child.name.StartsWith("PvP_SimVisual_", StringComparison.Ordinal)) { visual = child; break; }
                 if (visual == null) failures.Add("proxy" + (i + 1) + "_visual");
@@ -847,20 +1250,44 @@ namespace ErenshorPvP
                 EligibleCombatSpellCounts.Remove(member.GetInstanceID());
                 EligibleHealSpellCounts.Remove(member.GetInstanceID());
                 AttackDecisionCounts.Remove(member.GetInstanceID());
+                AttackSkillDecisionLogged.Remove(member.GetInstanceID());
+                AttackSpellDecisionLogged.Remove(member.GetInstanceID());
                 HealCheckCounts.Remove(member.GetInstanceID());
                 SpellStartCounts.Remove(member.GetInstanceID());
                 NativeStartBypassEligible.Remove(member.GetInstanceID());
+                NativeUpdateReached.Remove(member.GetInstanceID());
+                CombatSectionReached.Remove(member.GetInstanceID());
+                LegalTargetAcquired.Remove(member.GetInstanceID());
+                NavPursuitRequested.Remove(member.GetInstanceID());
+                MeleeAttemptCounts.Remove(member.GetInstanceID());
+                NativeUpdateExceptionLogged.Remove(member.GetInstanceID());
                 try { UnityEngine.Object.Destroy(member); } catch { }
             }
-            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); EligibleHealSpellCounts.Clear(); AttackDecisionCounts.Clear(); HealCheckCounts.Clear(); SpellStartCounts.Clear(); LastSpellStartFrame.Clear(); NativeStartBypassEligible.Clear(); DestroyTemporarySpells();
+            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); EligibleHealSpellCounts.Clear(); AttackDecisionCounts.Clear(); AttackSkillDecisionLogged.Clear(); AttackSpellDecisionLogged.Clear(); HealCheckCounts.Clear(); SpellStartCounts.Clear(); LastSpellStartFrame.Clear(); NativeStartBypassEligible.Clear(); NativeUpdateReached.Clear(); CombatSectionReached.Clear(); LegalTargetAcquired.Clear(); NavPursuitRequested.Clear(); MeleeAttemptCounts.Clear(); NativeUpdateExceptionLogged.Clear(); DestroyTemporarySpells();
             PvpDiagnostics.Log("validation_cleanup match=" + ShortMatch(completedMatchId) +
                 "; proxy_collections=" + TeamClones.Count + "; profile_collections=" + TeamProfiles.Count +
                 "; spell_collections=" + TemporarySpells.Count + "; destroy_scheduled=" + proxyCount);
             string completedClassification = ErenshorPvpApi.ClassifyOutcome(reason);
-            if (ErenshorPvpApi.TryRecordResult(completedMatchId, opponent, reason ?? "unknown", completedMode.ToString().ToLowerInvariant(), completedClassification))
-                ErenshorPvpEvents.Publish(new PvpSemanticEvent("pvp_match_completed", completedMatchId, opponent,
-                    UnityEngine.SceneManagement.SceneManager.GetActiveScene().name, completedMode.ToString().ToLowerInvariant(), reason ?? "unknown", completedClassification));
-            PvpRecordService.Complete(opponent, reason ?? "unknown", completedMode);
+            bool competitiveResult = PvpCombatStartupPolicy.ShouldRecordCompetitiveResult(reason);
+            if (competitiveResult)
+            {
+                if (ErenshorPvpApi.TryRecordResult(completedMatchId, opponent, reason ?? "unknown", completedMode.ToString().ToLowerInvariant(), completedClassification))
+                    ErenshorPvpEvents.Publish(new PvpSemanticEvent("pvp_match_completed", completedMatchId, opponent,
+                        UnityEngine.SceneManagement.SceneManager.GetActiveScene().name, completedMode.ToString().ToLowerInvariant(), reason ?? "unknown", completedClassification));
+                PvpRecordService.Complete(opponent, reason ?? "unknown", completedMode);
+            }
+            else
+            {
+                // Technical startup failure is operational evidence, not a PvP result. Publish a
+                // transient cancellation event for integrations but deliberately do not append it to
+                // RecentResults/PvpRecordService or grant any reward/stat/history credit.
+                ErenshorPvpEvents.Publish(new PvpSemanticEvent("pvp_cancelled", completedMatchId, opponent,
+                    UnityEngine.SceneManagement.SceneManager.GetActiveScene().name, completedMode.ToString().ToLowerInvariant(),
+                    reason ?? "unknown", "invalid"));
+                PvpDiagnostics.Log("technical_failure_result match=" + ShortMatch(completedMatchId) +
+                    "; winner=none; xp=0; gold=0; win_credit=false; history_credit=false");
+                winner = null;
+            }
             Debug.Log("[Erenshor PvP] lethal_result=" + (reason ?? "unknown") + "; mode=" + completedMode.ToString().ToLowerInvariant() + "; motive=" + completedMotive + "; winner=" + (winner == null ? "none" : "player"));
             try
             {
@@ -870,7 +1297,7 @@ namespace ErenshorPvP
                 else if (string.Equals(reason, "player_fled", StringComparison.Ordinal)) UpdateSocialLog.LogAdd("[PvP] You disengage from " + opponent + " and escape.", "lightblue");
             }
             catch { }
-            if (winner != null && string.Equals(reason, "proxy_death", StringComparison.Ordinal))
+            if (PvpCombatStartupPolicy.CanGrantVictoryReward(reason, winner != null))
             {
                 string result = PvpRewardService.GrantVictory(completedMatchId, winner, completedProfiles);
                 PvpDiagnostics.Log("reward_result match=" + ShortMatch(completedMatchId) + "; " + result.Replace("[Erenshor PvP] ", string.Empty));
@@ -970,8 +1397,14 @@ namespace ErenshorPvP
             bool caster = TryReadField(npc, "MySpells", out value) && value != null;
             bool flash = TryReadField(npc, "NameFlash", out value) && value != null;
             bool raid = TryReadField(npc, "MyRaidSlot", out value) && value != null;
+            // namePlateTxt is the field NPC.HandleNameTag actually dereferences. It is reported
+            // separately from nameFlash because a template can satisfy one and not the other, which is
+            // exactly how the broken 5v5 logged nameFlash=True while every proxy still threw.
+            bool plateText = TryReadField(npc, "NamePlateTxt", out value) && value != null;
+            bool plateObject = TryReadField(npc, "NamePlateObject", out value) && value != null;
             return "npcMyself=" + self + "; npcMyStats=" + stats + "; npcMyNav=" + nav +
-                "; npcMySpells=" + caster + "; nameFlash=" + flash + "; raidSlot=" + raid;
+                "; npcMySpells=" + caster + "; nameFlash=" + flash + "; raidSlot=" + raid +
+                "; namePlateTxt=" + plateText + "; namePlateObject=" + plateObject;
         }
 
         // Companion bodies have very different scale, animation, and stat lifecycles from normal
@@ -1002,7 +1435,7 @@ namespace ErenshorPvP
             npc.MyAttackSkills = npc.MyAttackSkills ?? new List<Skill>(); npc.MyAttackSkills.Clear();
             npc.MyPetSpell = null; npc.MyHOTSpell = null; npc.GroupHOTSpell = null;
             npc.MyEmitVitaeSpell = null; npc.AETaunt = null; npc.NPCProcOnHit = null;
-            npc.NoSelfHeal = true;
+            npc.NoSelfHeal = false;
             npc.GuildName = profile == null ? string.Empty : profile.GuildId;
             int level = profile == null ? 1 : Math.Max(1, profile.Level);
             // The previous level..2x-level range became trivial chip damage after player armor.
@@ -1198,9 +1631,9 @@ namespace ErenshorPvP
                     Spell spell = UnityEngine.Object.Instantiate(source); spell.CanHitPlayers = true; TemporarySpells.Add(spell);
                     if (spell.Type == Spell.SpellType.Heal || spell.TargetHealing > 0 || spell.CasterHealing > 0)
                     {
-                        // Healers may use their verified loadout, but a PvP proxy must never
-                        // re-enable the borrowed NPC body's self-heal loop. That made some
-                        // opponents effectively unkillable in early live tests.
+                        // Preserve native healer behavior, including self-heals and allied heals.
+                        // PvP containment rejects cross-team/outside spell healing instead of
+                        // globally disabling the NPC's self-heal decision path.
                         npc.MyHealSpells.Add(spell);
                         categorized++;
                     }
@@ -1386,11 +1819,48 @@ namespace ErenshorPvP
         }
     }
 
+    [HarmonyPatch(typeof(NPC), "Update")]
+    internal static class PvpNativeUpdateTelemetryPatch
+    {
+        [HarmonyPrefix]
+        private static void Prefix(NPC __instance)
+        { PvpTemporaryCloneFactory.ObserveNativeUpdate(__instance); }
+
+        [HarmonyPostfix]
+        private static void Postfix(NPC __instance)
+        { PvpTemporaryCloneFactory.ObserveNativeUpdateCompleted(__instance); }
+
+        [HarmonyFinalizer]
+        private static Exception Finalizer(NPC __instance, Exception __exception)
+        { return PvpTemporaryCloneFactory.ObserveNativeUpdateException(__instance, __exception); }
+    }
+
+    [HarmonyPatch(typeof(NPC), "Combat")]
+    internal static class PvpCombatSectionTelemetryPatch
+    {
+        [HarmonyPrefix]
+        private static void Prefix(NPC __instance) { PvpTemporaryCloneFactory.ObserveCombatSection(__instance); }
+    }
+
+    [HarmonyPatch(typeof(NPC), "PerformMeleeHit")]
+    internal static class PvpMeleeAttemptTelemetryPatch
+    {
+        [HarmonyPrefix]
+        private static void Prefix(NPC __instance) { PvpTemporaryCloneFactory.ObserveMeleeAttempt(__instance); }
+    }
+
+    [HarmonyPatch(typeof(NPC), "DoAttackSkill")]
+    internal static class PvpAttackSkillDecisionTelemetryPatch
+    {
+        [HarmonyPrefix]
+        private static void Prefix(NPC __instance) { PvpTemporaryCloneFactory.ObserveAttackDecision(__instance, false); }
+    }
+
     [HarmonyPatch(typeof(NPC), "DoAttackSpell")]
     internal static class PvpAttackDecisionTelemetryPatch
     {
         [HarmonyPrefix]
-        private static void Prefix(NPC __instance) { PvpTemporaryCloneFactory.ObserveAttackDecision(__instance); }
+        private static void Prefix(NPC __instance) { PvpTemporaryCloneFactory.ObserveAttackDecision(__instance, true); }
     }
 
     [HarmonyPatch(typeof(NPC), "CheckHeals")]
@@ -1409,24 +1879,24 @@ namespace ErenshorPvP
 
     [HarmonyPatch(typeof(CastSpell), "StartSpell", new Type[] { typeof(Spell), typeof(Stats) })]
     internal static class PvpSpellStartTelemetry2Patch
-    { [HarmonyPrefix] private static void Prefix(CastSpell __instance, Spell __0) { PvpTemporaryCloneFactory.ObserveSpellStart(__instance, __0); } }
+    { [HarmonyPrefix] private static bool Prefix(CastSpell __instance, Spell __0, Stats __1) { return PvpTemporaryCloneFactory.ObserveAndAllowSpellStart(__instance, __0, __1); } }
     [HarmonyPatch(typeof(CastSpell), "StartSpell", new Type[] { typeof(Spell), typeof(Stats), typeof(float) })]
     internal static class PvpSpellStartTelemetry3Patch
-    { [HarmonyPrefix] private static void Prefix(CastSpell __instance, Spell __0) { PvpTemporaryCloneFactory.ObserveSpellStart(__instance, __0); } }
+    { [HarmonyPrefix] private static bool Prefix(CastSpell __instance, Spell __0, Stats __1) { return PvpTemporaryCloneFactory.ObserveAndAllowSpellStart(__instance, __0, __1); } }
     [HarmonyPatch(typeof(CastSpell), "StartSpell", new Type[] { typeof(Spell), typeof(Stats), typeof(float), typeof(bool) })]
     internal static class PvpSpellStartTelemetry4Patch
-    { [HarmonyPrefix] private static void Prefix(CastSpell __instance, Spell __0) { PvpTemporaryCloneFactory.ObserveSpellStart(__instance, __0); } }
+    { [HarmonyPrefix] private static bool Prefix(CastSpell __instance, Spell __0, Stats __1) { return PvpTemporaryCloneFactory.ObserveAndAllowSpellStart(__instance, __0, __1); } }
     [HarmonyPatch(typeof(CastSpell), "StartSpell", new Type[] { typeof(Spell), typeof(Stats), typeof(float), typeof(bool), typeof(float) })]
     internal static class PvpSpellStartTelemetry5Patch
-    { [HarmonyPrefix] private static void Prefix(CastSpell __instance, Spell __0) { PvpTemporaryCloneFactory.ObserveSpellStart(__instance, __0); } }
+    { [HarmonyPrefix] private static bool Prefix(CastSpell __instance, Spell __0, Stats __1) { return PvpTemporaryCloneFactory.ObserveAndAllowSpellStart(__instance, __0, __1); } }
 
     [HarmonyPatch(typeof(CastSpell), "StartSpellFromProc", new Type[] { typeof(Spell), typeof(Stats), typeof(float), typeof(bool), typeof(float) })]
     internal static class PvpSpellProcTelemetryPatch
-    { [HarmonyPrefix] private static void Prefix(CastSpell __instance, Spell __0) { PvpTemporaryCloneFactory.ObserveSpellStart(__instance, __0); } }
+    { [HarmonyPrefix] private static bool Prefix(CastSpell __instance, Spell __0, Stats __1) { return PvpTemporaryCloneFactory.ObserveAndAllowSpellStart(__instance, __0, __1); } }
 
     [HarmonyPatch(typeof(CastSpell), "StartSpellNoAnim", new Type[] { typeof(Spell), typeof(Stats), typeof(float) })]
     internal static class PvpSpellNoAnimTelemetryPatch
-    { [HarmonyPrefix] private static void Prefix(CastSpell __instance, Spell __0) { PvpTemporaryCloneFactory.ObserveSpellStart(__instance, __0); } }
+    { [HarmonyPrefix] private static bool Prefix(CastSpell __instance, Spell __0, Stats __1) { return PvpTemporaryCloneFactory.ObserveAndAllowSpellStart(__instance, __0, __1); } }
 
     [HarmonyPatch(typeof(Character), "DoDeath")]
     internal static class PvpTemporaryCloneDeathRewardPatch

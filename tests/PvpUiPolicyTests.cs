@@ -34,9 +34,15 @@ internal static class PvpUiPolicyTests
             Assert(!PvpProxyStartupPolicy.ShouldRunNativeNpcStart(true, true), "live native NPC.Start bypass is temporary-proxy-only");
             Assert(PvpProxyStartupPolicy.ShouldRunNativeNpcStart(false, true), "ordinary native NPC.Start remains untouched");
             Assert(PvpProxyStartupPolicy.ShouldRunNativeNpcStart(true, false), "resource-prefab proxy retains unproven native Start lifecycle");
-            Assert(PvpProxyStartupPolicy.MaintenanceStatePasses(true, true, true, true, true, true, true), "proxy maintenance invariant accepts NPC-side runtime state");
-            Assert(!PvpProxyStartupPolicy.MaintenanceStatePasses(true, true, false, true, true, true, true), "proxy maintenance invariant rejects missing NPC.MyStats");
-            Assert(!PvpProxyStartupPolicy.MaintenanceStatePasses(true, true, true, true, true, false, true), "proxy maintenance invariant rejects missing NameFlash");
+            Assert(PvpProxyStartupPolicy.MaintenanceStatePasses(true, true, true, true, true, true, true, true, true), "proxy maintenance invariant accepts NPC-side runtime state");
+            Assert(!PvpProxyStartupPolicy.MaintenanceStatePasses(true, true, false, true, true, true, true, true, true), "proxy maintenance invariant rejects missing NPC.MyStats");
+            Assert(!PvpProxyStartupPolicy.MaintenanceStatePasses(true, true, true, true, true, false, true, true, true), "proxy maintenance invariant rejects missing NameFlash");
+            // Regression for the 5v5 that logged nameFlash=True / requiredRuntimeState=PASS and still threw
+            // ~1,130 NPC.HandleNameTag NREs: NameFlash is not the field HandleNameTag dereferences, so a
+            // proxy that satisfies NameFlash but lacks NamePlateTxt/NamePlateObject must NOT pass.
+            Assert(!PvpProxyStartupPolicy.MaintenanceStatePasses(true, true, true, true, true, true, true, false, true), "proxy maintenance invariant rejects missing NamePlateTxt even when NameFlash is bound");
+            Assert(!PvpProxyStartupPolicy.MaintenanceStatePasses(true, true, true, true, true, true, true, true, false), "proxy maintenance invariant rejects missing NamePlateObject even when NameFlash is bound");
+            Assert(!PvpProxyStartupPolicy.MaintenanceStatePasses(false, true, true, true, true, true, true, true, true), "proxy maintenance invariant only applies to registered temporary proxies");
             Assert(PvpProxyStartupPolicy.ShouldInterceptMaintenance(true, false), "invalid temporary proxy is intercepted for terminal cleanup");
             Assert(!PvpProxyStartupPolicy.ShouldInterceptMaintenance(false, false), "vanilla NPC is never intercepted by PvP failsafe");
             Assert(!PvpProxyStartupPolicy.ShouldInterceptMaintenance(true, true), "valid temporary proxy keeps native maintenance");
@@ -47,6 +53,38 @@ internal static class PvpUiPolicyTests
             Assert(PvpProxyStartupPolicy.ZeroHealingAssessment(1, 0, 0, 0) == "heal_ai_not_evaluated", "heal-capable roster without heal checks is diagnostic");
             Assert(PvpProxyStartupPolicy.ZeroHealingAssessment(1, 3, 0, 0) == "heal_capable_but_no_cast_started", "heal checks without casts remain diagnostic");
             Assert(PvpProxyStartupPolicy.ZeroHealingAssessment(1, 3, 2, 0) == "heal_capable_casting_observed_no_effective_heal", "casting without healing remains diagnostic");
+
+            Assert(PvpWorldCombatPolicy.RunSelfTests().StartsWith("PASS", StringComparison.Ordinal), "MMO-style world-combat expansion policy");
+            Assert(!PvpWorldCombatPolicy.IsProtectedNonCombat(true, false, true, true, true, true, true), "local/world Sim identity outranks neutral NPC heuristics");
+            Assert(!PvpWorldCombatPolicy.IsProtectedNonCombat(false, true, true, true, true, true, true), "owned/summoned pet identity outranks neutral NPC heuristics");
+            Assert(PvpWorldCombatPolicy.IsProtectedNonCombat(false, false, true, false, false, false, false), "vendor is protected noncombat world actor");
+            Assert(PvpWorldCombatPolicy.DecideAggro(true, false, false, false, false, false) == PvpInteractionDecision.AllowWorld, "proxy may join native world combat");
+            Assert(PvpWorldCombatPolicy.DecideAggro(false, false, true, false, false, false) == PvpInteractionDecision.AllowWorld, "outside world actor may aggro PvP attacker");
+            Assert(PvpWorldCombatPolicy.DecideDamage(true, false, false, false, false, false, false) == PvpInteractionDecision.AllowWorld, "outside world damage may hit defender");
+            Assert(PvpWorldCombatPolicy.DecideDamage(false, true, false, false, false, false, false) == PvpInteractionDecision.AllowWorld, "outside world damage may hit attacker");
+            Assert(PvpWorldCombatPolicy.DecideSpellStart(false, true, false, false, true, false, false, false) == PvpInteractionDecision.AllowMatch, "attacker untargeted AoE is admitted without proximity veto");
+            Assert(PvpWorldCombatPolicy.DecideSpellStart(true, false, false, false, true, false, false, false) == PvpInteractionDecision.AllowMatch, "defender untargeted AoE is admitted without proximity veto");
+            Assert(PvpWorldCombatPolicy.DecideDamage(false, false, true, false, false, false, true) == PvpInteractionDecision.Block, "participant damage to proven protected neutral is rejected narrowly");
+
+            Assert(PvpPluginIdentityPolicy.ExactlyOneExpectedIdentity(new[] { "Lunaris", "ErenshorPvP", "OtherMod" }), "exactly one PvP plugin identity expected");
+            Assert(!PvpPluginIdentityPolicy.ExactlyOneExpectedIdentity(new[] { "ErenshorPvP", "ErenshorPvP" }), "duplicate PvP plugin identity rejected");
+            Assert(!PvpPluginIdentityPolicy.ExactlyOneExpectedIdentity(new[] { "Lunaris", "OtherMod" }), "missing PvP plugin identity rejected");
+
+            Assert(!PvpCombatStartupPolicy.HasCombatEvidence(true, false, false, false, false, false, false, false), "native Update alone is not combat evidence");
+            Assert(!PvpCombatStartupPolicy.HasCombatEvidence(false, true, false, false, false, false, false, false), "forced target alone is not combat evidence");
+            Assert(PvpCombatStartupPolicy.HasCombatEvidence(true, true, false, false, false, false, false, false), "native target acquisition path counts only after Update");
+            Assert(PvpCombatStartupPolicy.HasCombatEvidence(false, false, true, false, false, false, false, false), "native pursuit counts as combat active");
+            Assert(PvpCombatStartupPolicy.HasCombatEvidence(false, false, false, true, false, false, false, false), "melee-only/combat decision counts as active");
+            Assert(PvpCombatStartupPolicy.HasCombatEvidence(false, false, false, false, false, true, false, false), "spell attacker counts as active");
+            Assert(PvpCombatStartupPolicy.HasCombatEvidence(false, false, false, false, true, false, false, false), "healer/support attacker counts as active");
+            Assert(!PvpCombatStartupPolicy.ShouldFailInactive(true, false, 5.9f, 6f), "startup watchdog waits bounded window");
+            Assert(PvpCombatStartupPolicy.ShouldFailInactive(true, false, 6f, 6f), "completely inert active team fails technically");
+            Assert(!PvpCombatStartupPolicy.ShouldFailInactive(true, true, 99f, 6f), "engaged team never fails inert watchdog");
+            Assert(PvpCombatStartupPolicy.IsTechnicalFailure("technical_failure_ai_inactive"), "technical failure token exact");
+            Assert(!PvpCombatStartupPolicy.ShouldRecordCompetitiveResult("technical_failure_ai_inactive"), "technical failure receives no match/history credit");
+            Assert(!PvpCombatStartupPolicy.CanGrantVictoryReward("technical_failure_ai_inactive", true), "technical failure grants zero reward");
+            Assert(PvpCombatStartupPolicy.CanGrantVictoryReward("proxy_death", true), "legitimate victory remains reward eligible exactly once downstream");
+
             PvpPointerOwnershipState pointer = new PvpPointerOwnershipState();
             Assert(pointer.PointerDown() && pointer.OwnsPointer && !pointer.IsDragging, "PvP drag owns input at pointer-down before threshold");
             Assert(!pointer.PointerDown(), "repeated pointer-down does not double-acquire");
@@ -68,15 +106,24 @@ internal static class PvpUiPolicyTests
             lifecycle.SetEnabled(true);
             Assert(lifecycle.State == PvpMatchLifecycleState.Ready, "enable makes a fresh match ready");
             Assert(lifecycle.Queue("match-a") && lifecycle.State == PvpMatchLifecycleState.PendingChallenge, "challenge setup owns one pending match");
-            Assert(lifecycle.BeginSpawn("match-a") && lifecycle.State == PvpMatchLifecycleState.Spawning, "accept advances pending match to spawn");
-            lifecycle.BeginCleanup(); lifecycle.CompleteCleanup(true);
-            Assert(lifecycle.State == PvpMatchLifecycleState.Ready && lifecycle.MatchId == string.Empty, "failed spawn cleans to fresh ready state");
-            Assert(lifecycle.BeginSpawn("match-b") && lifecycle.SpawnSucceeded() && lifecycle.State == PvpMatchLifecycleState.Active, "valid match becomes active once");
+            Assert(lifecycle.BeginSpawn("match-a") && lifecycle.State == PvpMatchLifecycleState.Preparing, "accept advances pending match to preparation");
+            Assert(lifecycle.HoldAttackers && !lifecycle.DefenderMayAttackProxy && !lifecycle.CombatReleased, "preparation holds both attack permissions");
+            Assert(lifecycle.SpawnSucceeded() && lifecycle.State == PvpMatchLifecycleState.Countdown, "runtime-ready attackers advance to countdown");
+            Assert(lifecycle.HoldAttackers && !lifecycle.DefenderMayAttackProxy && !lifecycle.CombatReleased, "countdown holds both sides before GO");
+            Assert(lifecycle.Go() && lifecycle.State == PvpMatchLifecycleState.Active, "GO alone transitions match active");
+            Assert(lifecycle.GoTransitions == 1 && lifecycle.CombatReleased && !lifecycle.HoldAttackers && lifecycle.DefenderMayAttackProxy, "GO releases both sides exactly once");
+            Assert(!lifecycle.Go() && lifecycle.GoTransitions == 1, "GO cannot run twice");
             Assert(!lifecycle.BeginSpawn("match-c"), "active match rejects duplicate attacker group");
             lifecycle.BeginCleanup(); lifecycle.CompleteCleanup(true);
-            Assert(lifecycle.State == PvpMatchLifecycleState.Ready, "terminal victory or loss cleanup permits immediate second match");
-            Assert(lifecycle.BeginSpawn("match-c") && lifecycle.SpawnSucceeded(), "repeated match is a fresh lifecycle");
-            lifecycle.BeginCleanup(); lifecycle.CompleteCleanup(false);
+            Assert(lifecycle.State == PvpMatchLifecycleState.Ready && lifecycle.MatchId == string.Empty, "terminal cleanup returns fresh ready state");
+            Assert(lifecycle.BeginSpawn("match-b") && lifecycle.State == PvpMatchLifecycleState.Preparing, "second match starts without restart");
+            Assert(lifecycle.SpawnSucceeded() && lifecycle.State == PvpMatchLifecycleState.Countdown, "second match reaches countdown");
+            Assert(lifecycle.Go() && lifecycle.State == PvpMatchLifecycleState.Active && lifecycle.GoTransitions == 1, "second match gets one fresh GO");
+            lifecycle.BeginCleanup();
+            PvpMatchLifecycleState cleanupState = lifecycle.State;
+            lifecycle.BeginCleanup();
+            Assert(lifecycle.State == cleanupState, "cleanup begins idempotently");
+            lifecycle.CompleteCleanup(false);
             Assert(lifecycle.State == PvpMatchLifecycleState.Disabled && lifecycle.MatchId == string.Empty, "zone/disable cleanup releases active ownership without restart");
             Console.WriteLine("PvpUiPolicyTests: PASS"); return 0;
         }

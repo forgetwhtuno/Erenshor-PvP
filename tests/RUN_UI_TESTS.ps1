@@ -15,6 +15,9 @@ $csc=Find-Csc; $out=Join-Path $env:TEMP "ErenshorPvP.UiPolicyTests.exe"
   (Join-Path $Root "src\PvpProxyStartupPolicy.cs") `
   (Join-Path $Root "src\PvpPointerOwnershipState.cs") `
   (Join-Path $Root "src\PvpMatchLifecyclePolicy.cs") `
+  (Join-Path $Root "src\PvpCombatStartupPolicy.cs") `
+  (Join-Path $Root "src\PvpWorldCombatPolicy.cs") `
+  (Join-Path $Root "src\PvpPluginIdentityPolicy.cs") `
   (Join-Path $Root "tests\PvpUiPolicyTests.cs")
 if ($LASTEXITCODE -ne 0) { throw "PvP UI policy test compilation failed." }
 try { & $out; if ($LASTEXITCODE -ne 0) { throw "PvP UI policy tests failed." } } finally { Remove-Item $out -Force -ErrorAction SilentlyContinue }
@@ -64,3 +67,100 @@ if ($panelSource -notmatch 'AddVerticalChevron\(_collapseChevron, true\)' -or
     throw "PvP Forgotten Roads header collapse contract failed."
 }
 Write-Host "PvP Forgotten Roads header collapse contract: PASS" -ForegroundColor Green
+
+
+# Arranged match-start/native-AI source contracts. These are deterministic wiring guards for
+# Unity/Harmony paths that cannot be executed by the standalone policy test executable.
+$containmentSource = Get-Content (Join-Path $Root "src\PvpCombatContainment.cs") -Raw
+$lifecycleSource = Get-Content (Join-Path $Root "src\PvpMatchLifecyclePolicy.cs") -Raw
+$startupPolicySource = Get-Content (Join-Path $Root "src\PvpCombatStartupPolicy.cs") -Raw
+
+foreach ($token in @(
+  'PvpMatchLifecycleState.Countdown',
+  'BeginMatchCountdown',
+  'Say("[PvP] 3")',
+  'Say("[PvP] GO")',
+  '_lifecycle.Go()',
+  'PrepareForCountdown',
+  'npc.NeverAggro = true',
+  'EnemyNpcs[i].NeverAggro = false',
+  'go_release',
+  'TrySetField(npc, "navDo", null)',
+  'TrySetField(npc, "behDo", null)',
+  'HasNativeNavCoroutine',
+  'proxy_native_coroutines',
+  'native_update_reached',
+  'combat_section_reached',
+  'legal_target_acquired',
+  'nav_pursuit_requested',
+  'melee_decision',
+  'melee_attempt',
+  'attack_spell_decision',
+  'heal_check',
+  'spell_start',
+  'damage_to_defender',
+  'heal_to_attacker',
+  'technical_failure_ai_inactive',
+  'HasAnyNativeCombatEvidence',
+  'CanGrantVictoryReward'
+)) {
+  if (($controllerSource + $factorySource + $containmentSource + $lifecycleSource + $startupPolicySource) -notmatch [regex]::Escape($token)) {
+    throw "PvP match-start/native-AI guard failed: missing $token"
+  }
+}
+if ($factorySource -notmatch 'npc\.NoSelfHeal = false') { throw "PvP healing guard failed: native self-heal remains disabled." }
+if ($factorySource -notmatch 'if \(npc\.NoSelfHeal\) failures\.Add') { throw "PvP healing guard failed: runtime verifier still expects self-heal suppression." }
+if ($containmentSource -notmatch 'return !PvpTemporaryCloneFactory\.IsTemporaryNpc\(npc\)[\s\S]*!PvpTemporaryCloneFactory\.IsTemporaryActor\(target\)') { throw "PvP pre-GO guard failed: defender-side proxy acquisition is not held." }
+if ($containmentSource -notmatch 'Defenders\.Add\(player\)' -or $containmentSource -notmatch 'AddPartyDefenders\(\)' -or
+    $containmentSource -notmatch 'RegisterDefenderPet\(actor\)' -or $containmentSource -notmatch 'actor\.Master') {
+  throw "PvP participant guard failed: player/current party/current owned-pet defender set is incomplete."
+}
+if ($factorySource -notmatch 'ShouldRecordCompetitiveResult\(reason\)' -or
+    $factorySource -notmatch 'history_credit=false' -or
+    $factorySource -notmatch 'winner = null') {
+  throw "PvP technical-failure guard failed: no-credit terminal path missing."
+}
+if ($containmentSource -notmatch 'AllowSpellStart' -or $factorySource -notmatch 'ObserveAndAllowSpellStart') {
+  throw "PvP pre-GO guard failed: temporary-proxy spell initiation is not held."
+}
+$worldPolicySource = Get-Content (Join-Path $Root "src\PvpWorldCombatPolicy.cs") -Raw
+if ($containmentSource -notmatch 'AllowHeal' -or $worldPolicySource -notmatch 'targetDefender && sourceDefender' -or
+    $worldPolicySource -notmatch 'targetAttacker && sourceAttacker') {
+  throw "PvP healing guard failed: same-team native healing policy missing."
+}
+foreach ($token in @(
+  'AllowWorld',
+  'IsProtectedNonCombat',
+  'simPlayer || ownedOrSummoned',
+  'sourceParticipant && noTarget',
+  'Do not proximity-block AE/PBAE starts',
+  'IsProtectedWorldActor',
+  'protected_target_cleared',
+  'SpawnActorCollisionClearance',
+  'protectedActors',
+  'IsPermittedProxyTarget'
+)) {
+  if (($worldPolicySource + $containmentSource + $factorySource) -notmatch [regex]::Escape($token)) {
+    throw "PvP world-combat guard failed: missing $token"
+  }
+}
+if ($containmentSource -match 'third_party_aggro' -or $containmentSource -match '_thirdPartyInterference' -or
+    $controllerSource -match 'WorldCombatBusy\(\)' -or $controllerSource -match 'player_in_combat') {
+  throw "PvP world-combat guard failed: isolation-era third-party/player-in-combat abort remains wired."
+}
+if ($worldPolicySource -notmatch 'DecideAggro[\s\S]*AllowWorld' -or
+    $worldPolicySource -notmatch 'DecideDamage[\s\S]*AllowWorld' -or
+    $worldPolicySource -notmatch 'DecideHeal[\s\S]*AllowWorld') {
+  throw "PvP world-combat guard failed: native outside aggro/damage/heal is not admitted."
+}
+Write-Host "PvP MMO world-combat policy source guards: PASS" -ForegroundColor Green
+
+if ($rewardSource -notmatch '_lastClaimedMatchId' -or $rewardSource -notmatch 'already claimed' -or
+    $rewardSource -notmatch 'TryPersistSettings\(\)') {
+  throw "PvP reward guard failed: legitimate match exact-once claim barrier missing."
+}
+if ($factorySource -notmatch 'TeamClones\.Count == 0 && _clone == null\) return' -or
+    $controllerSource -notmatch 'EncounterCleaned\(\)') {
+  throw "PvP cleanup guard failed: duplicate-safe terminal cleanup missing."
+}
+Write-Host "PvP arranged match-start/native-AI source guards: PASS" -ForegroundColor Green

@@ -399,11 +399,12 @@ namespace ErenshorPvP
         private static void UpdateValues()
         {
             if (!_built) return;
-            if (_launcherText != null) _launcherText.text = PvpController.Enabled ? "PVP [ON]" : "PVP [OFF]";
-            if (_titleText != null) _titleText.text = "ERENSHOR PvP  •  " + PvpController.HubStatus();
+            if (_launcherText != null) _launcherText.text = !PvpControlApi.RuntimeReady ? "PVP [ERR]" : (PvpController.Enabled ? "PVP [ON]" : "PVP [OFF]");
+            if (_titleText != null) _titleText.text = "ERENSHOR PvP  •  " + PvpControlApi.GetStatus();
             if (_statusText != null)
             {
                 _statusText.text =
+                    (PvpControlApi.RuntimeReady ? string.Empty : "Compatibility: unavailable - gameplay disabled\n") +
                     "PvP: " + OnOff(PvpController.Enabled) + "\n" +
                     "Arranged challenges: " + OnOff(PvpController.ArrangedEnabled) + " (consensual)\n" +
                     "Wild ambushes: " + OnOff(PvpController.AmbushEnabled) + "\n" +
@@ -416,16 +417,19 @@ namespace ErenshorPvP
             bool ambush = PvpController.AmbushEnabled;
             if (_enabledButton != null)
             {
+                _enabledButton.interactable = PvpControlApi.RuntimeReady;
                 SetButtonText(_enabledButton, PvpUiPresentation.ToggleLabel("PvP Enabled", enabled));
                 if (!_toggleVisualInitialized || _lastEnabledVisual != enabled) SetToggleButtonState(_enabledButton, enabled);
             }
             if (_arrangedButton != null)
             {
+                _arrangedButton.interactable = PvpControlApi.RuntimeReady;
                 SetButtonText(_arrangedButton, PvpUiPresentation.ToggleLabel("Arranged Challenges", arranged));
                 if (!_toggleVisualInitialized || _lastArrangedVisual != arranged) SetToggleButtonState(_arrangedButton, arranged);
             }
             if (_ambushButton != null)
             {
+                _ambushButton.interactable = PvpControlApi.RuntimeReady;
                 SetButtonText(_ambushButton, PvpUiPresentation.ToggleLabel("Wild Ambushes", ambush));
                 if (!_toggleVisualInitialized || _lastAmbushVisual != ambush) SetToggleButtonState(_ambushButton, ambush);
             }
@@ -433,7 +437,11 @@ namespace ErenshorPvP
             _lastArrangedVisual = arranged;
             _lastAmbushVisual = ambush;
             _toggleVisualInitialized = true;
-            if (_ambushHereButton != null) SetButtonText(_ambushHereButton, PvpController.AmbushZoneListedHere ? "Stop ambushes here" : "Allow ambushes here");
+            if (_ambushHereButton != null)
+            {
+                _ambushHereButton.interactable = PvpControlApi.RuntimeReady;
+                SetButtonText(_ambushHereButton, PvpController.AmbushZoneListedHere ? "Stop ambushes here" : "Allow ambushes here");
+            }
             bool pending = PvpController.HasPending;
             if (_pendingText != null)
             {

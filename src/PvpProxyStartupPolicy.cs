@@ -25,11 +25,22 @@ namespace ErenshorPvP
         // HandleMaintenaceAndCounters dereferences NPC.MyStats every frame and dereferences
         // NPC.Myself/NameFlash when an aggro target exists. These are NPC-owned runtime fields;
         // Character.MyStats alone is not sufficient proof that a cloned NPC can enter Update.
+        //
+        // hasNamePlateText / hasNamePlateObject were added after the 5v5 that produced ~1,130
+        // NPC.HandleNameTag NREs while this invariant still reported PASS. hasNameFlash is NOT
+        // sufficient: NameFlash (FlashUIColors) is a DIFFERENT field from the one HandleNameTag
+        // dereferences. Verified against the installed Assembly-CSharp.dll, HandleNameTag reads
+        // NPC.NamePlateTxt (TMPro.TextMeshPro) through callvirt Behaviour.get_enabled() in every
+        // branch, and also reads NamePlateObject; both are written only by the NPC.Start that a
+        // live-cloned proxy deliberately skips. A proxy missing either would throw on its very first
+        // NPC.Update - before the NeverAggro gate and before all combat AI - so it must fail
+        // preparation instead of reaching Countdown/Active.
         internal static bool MaintenanceStatePasses(bool registeredTemporaryProxy, bool npcLinksCharacter,
-            bool npcLinksStats, bool npcLinksNav, bool npcLinksCaster, bool hasNameFlash, bool raidSlotClear)
+            bool npcLinksStats, bool npcLinksNav, bool npcLinksCaster, bool hasNameFlash, bool raidSlotClear,
+            bool hasNamePlateText, bool hasNamePlateObject)
         {
             return registeredTemporaryProxy && npcLinksCharacter && npcLinksStats && npcLinksNav &&
-                   npcLinksCaster && hasNameFlash && raidSlotClear;
+                   npcLinksCaster && hasNameFlash && raidSlotClear && hasNamePlateText && hasNamePlateObject;
         }
 
         internal static bool ShouldInterceptMaintenance(bool registeredTemporaryProxy, bool maintenanceStateValid)

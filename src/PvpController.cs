@@ -12,6 +12,7 @@ namespace ErenshorPvP
         // settings mutation below, since native Lunaris config (unlike BepInEx's ConfigEntry)
         // does not persist a .Value write to disk on its own.
         internal static Action SaveSettings;
+        internal static bool RuntimeHooksAvailable;
 
         private static PvpConfigEntry<bool> _enabled;
         private static PvpConfigEntry<bool> _arrangedEnabled;
@@ -45,6 +46,9 @@ namespace ErenshorPvP
         private static readonly Dictionary<string, float> Cooldowns = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
         private static bool _open;
         private static PvpMatchLifecyclePolicy _lifecycle = new PvpMatchLifecyclePolicy(false);
+        private static int _matchCountdownValue;
+        private static float _matchCountdownNextAt;
+        private static string _countdownMatchId = string.Empty;
 
         internal static bool Enabled { get { return _enabled != null && _enabled.Value; } }
         internal static bool ShowLauncherPreference { get { return _showQuickToggle == null || _showQuickToggle.Value; } }
@@ -98,14 +102,8 @@ namespace ErenshorPvP
 
         internal static void Tick()
         {
-            if (!IsGameplayReady())
-            {
-                ClearPending();
-                ClosePanel();
-                if (PvpTemporaryCloneFactory.HasActiveTeam) PvpTemporaryCloneFactory.Despawn("game_not_ready");
-                return;
-            }
-            // Consume externally requested panel state on Update, outside retained-uGUI event callbacks.
+            // External panel open/close remains available even when a game update invalidates one
+            // of the required Harmony hooks. Gameplay itself fails closed below.
             if (_pendingExternalClose)
             {
                 _pendingExternalClose = false;
@@ -116,6 +114,18 @@ namespace ErenshorPvP
                 _pendingExternalOpen = false;
                 _open = true;
             }
+            if (!RuntimeHooksAvailable)
+            {
+                ClearPending();
+                return;
+            }
+            if (!IsGameplayReady())
+            {
+                ClearPending();
+                ClosePanel();
+                if (PvpTemporaryCloneFactory.HasActiveTeam) PvpTemporaryCloneFactory.Despawn("game_not_ready");
+                return;
+            }
             float now = Time.unscaledTime;
             if (!Enabled)
             {
@@ -124,6 +134,12 @@ namespace ErenshorPvP
                 return;
             }
             PvpTemporaryCloneFactory.Tick();
+            if (_lifecycle.State == PvpMatchLifecycleState.Countdown)
+            {
+                TickMatchCountdown(now);
+                return;
+            }
+            if (_lifecycle.State == PvpMatchLifecycleState.Preparing) return;
             if (HasPending && now >= _pendingExpires) ClearPending();
             if (HasPending || now < _nextScan || now < _nextOffer) return;
             _nextScan = now + 12f;
@@ -145,7 +161,6 @@ namespace ErenshorPvP
             if (!IsGameplayReady()) { Diagnostic("scan blocked: game_not_ready"); return; }
             if (PvpCompatibility.IsCoopSession()) { Diagnostic("scan blocked: coop_session_not_supported"); return; }
             if (PvpTemporaryCloneFactory.HasActiveTeam) { Diagnostic("scan blocked: pvp_team_active"); return; }
-            if (PvpCombatContainment.WorldCombatBusy()) { Diagnostic("scan blocked: player_in_combat"); return; }
             if (!Enabled) { Say("[Erenshor PvP] Turn PvP on first: /epvp on"); return; }
             if (HasPending) { Say("[Erenshor PvP] A challenge is already waiting."); return; }
             string scene = SceneManager.GetActiveScene().name;
@@ -383,7 +398,6 @@ namespace ErenshorPvP
             if (!Enabled) return "blocked:pvp_disabled";
             if (PvpCompatibility.IsCoopSession()) return "blocked:coop_session_not_supported";
             if (PvpTemporaryCloneFactory.HasActiveTeam) return "blocked:pvp_team_active";
-            if (PvpCombatContainment.WorldCombatBusy()) return "blocked:player_in_combat";
             if (HasPending) return "blocked:challenge_pending";
             if (now < _nextOffer) return "blocked:global_cooldown";
             string scene = SceneManager.GetActiveScene().name;
@@ -503,7 +517,7 @@ namespace ErenshorPvP
                 "; ambush_allowed=" + AmbushAllowed(scene) + "; next_ambush_seconds=" + Math.Max(0, Mathf.RoundToInt(_nextAmbush - Time.unscaledTime)) +
                 "; hunt_camp=" + PvpCompatibility.IsVerifiedHuntCampActive() +
                 "; zoning=" + IsZoning() + "; coop=" + PvpCompatibility.IsCoopSession() + "; defenders=" + CurrentDefenderCount() +
-                "; defender_avg_level=" + DefenderAverageLevel +
+                "; defender_avg_level=" + DefenderAverageLevel + "; phase=" + _lifecycle.State.ToString().ToLowerInvariant() +
                 "; clear_spawn_5=" + clearSpawn + (clearSpawn ? string.Empty : "; clear_spawn_reason=" + spawnReason) +
                 "; off_map_profiles=" + offMap + "; same_zone_profiles=" + sameZone + "; " + PvpTemporaryCloneFactory.DiagnosticStatus();
         }
@@ -520,7 +534,7 @@ namespace ErenshorPvP
             if (_nextAmbush < Time.unscaledTime + 300f) _nextAmbush = Time.unscaledTime + 300f;
         }
         // Hot unload releases retained UI, drag ownership, proxy state, and optional bridge state.
-        internal static void Shutdown() { ClearPending(); PvpTemporaryCloneFactory.Shutdown(); _open = false; PvpPanel.Dispose(); _pendingExternalOpen = false; _pendingExternalClose = false; SuiteBridgeRegistered = false; SuiteUiPolicy.Reset(); }
+        internal static void Shutdown() { ClearPending(); ResetMatchCountdown(); PvpTemporaryCloneFactory.Shutdown(); _open = false; PvpPanel.Dispose(); _pendingExternalOpen = false; _pendingExternalClose = false; SuiteBridgeRegistered = false; SuiteUiPolicy.Reset(); }
 
         private static string Plan(string option)
         {
@@ -681,15 +695,97 @@ namespace ErenshorPvP
                 _lifecycle.CompleteCleanup(Enabled);
                 return;
             }
-            _lifecycle.SpawnSucceeded();
+            string preparationReason;
+            if (!PvpTemporaryCloneFactory.PrepareForCountdown(out preparationReason))
+            {
+                PvpDiagnostics.Warning("match_preparation_failed match=" + ShortMatch(id) + "; reason=" + preparationReason);
+                Say("[Erenshor PvP] Encounter cancelled: attacker runtime preparation failed (" + preparationReason + ").");
+                PvpTemporaryCloneFactory.Despawn("preparation_failed");
+                return;
+            }
+            if (!_lifecycle.SpawnSucceeded())
+            {
+                PvpTemporaryCloneFactory.Despawn("countdown_state_failed");
+                return;
+            }
+            if (mode == PvpEncounterMode.Arranged) BeginMatchCountdown(id);
+            else ReleaseMatchAtGo(id, false); // Preserve wild-ambush immediacy; no visible 3-2-1 warning.
+        }
+
+        private static void BeginMatchCountdown(string matchId)
+        {
+            _countdownMatchId = matchId ?? string.Empty;
+            _matchCountdownValue = 3;
+            _matchCountdownNextAt = Time.unscaledTime + 1f;
+            PvpDiagnostics.Log("countdown_started match=" + ShortMatch(_countdownMatchId) + "; attackers_held=true; defenders_held=true");
+            Say("[Erenshor PvP] Opponents ready. Match begins in 3...");
+            Say("[PvP] 3");
+        }
+
+        private static void TickMatchCountdown(float now)
+        {
+            if (_lifecycle.State != PvpMatchLifecycleState.Countdown) return;
+            if (!PvpTemporaryCloneFactory.HasActiveTeam)
+            {
+                ResetMatchCountdown();
+                _lifecycle.BeginCleanup();
+                _lifecycle.CompleteCleanup(Enabled);
+                return;
+            }
+            string holdReason;
+            if (!PvpTemporaryCloneFactory.MaintainCountdownHold(out holdReason))
+            {
+                PvpDiagnostics.Warning("countdown_hold_failed match=" + ShortMatch(_countdownMatchId) + "; reason=" + holdReason);
+                ResetMatchCountdown();
+                PvpTemporaryCloneFactory.Despawn("countdown_hold_failed");
+                return;
+            }
+            if (now < _matchCountdownNextAt) return;
+            _matchCountdownValue--;
+            _matchCountdownNextAt = now + 1f;
+            if (_matchCountdownValue > 0)
+            {
+                Say("[PvP] " + _matchCountdownValue);
+                return;
+            }
+
+            string matchId = _countdownMatchId;
+            ReleaseMatchAtGo(matchId, true);
+        }
+
+        private static void ReleaseMatchAtGo(string matchId, bool announceGo)
+        {
+            if (!_lifecycle.Go())
+            {
+                ResetMatchCountdown();
+                PvpTemporaryCloneFactory.Despawn("go_state_failed");
+                return;
+            }
             string started = PvpTemporaryCloneFactory.BeginLethalFight();
             if (!PvpCombatContainment.LethalFightActive)
             {
-                // Despawn owns terminal recording, publication, and cleanup. This preserves the real
-                // failure reason and prevents inert proxies lingering until their timer expires.
+                PvpDiagnostics.Warning("match_go_failed match=" + ShortMatch(matchId) + "; reason=combat_start_failed");
+                ResetMatchCountdown();
                 PvpTemporaryCloneFactory.Despawn("combat_start_failed");
+                Say(started);
+                return;
             }
+            ResetMatchCountdown();
+            PvpDiagnostics.Log("match_go match=" + ShortMatch(matchId) + "; attackers_released=true; defenders_released=true; go_count=" + _lifecycle.GoTransitions);
+            if (announceGo) Say("[PvP] GO");
             Say(started);
+        }
+
+        private static void ResetMatchCountdown()
+        {
+            _matchCountdownValue = 0;
+            _matchCountdownNextAt = 0f;
+            _countdownMatchId = string.Empty;
+        }
+
+        private static string ShortMatch(string matchId)
+        {
+            return string.IsNullOrEmpty(matchId) ? "none" : matchId.Substring(0, Math.Min(8, matchId.Length));
         }
 
         private static int CurrentDefenderCount()
@@ -745,7 +841,7 @@ namespace ErenshorPvP
         private static void ClearPending() { _lifecycle.ClearPending(); _pendingName = string.Empty; _pendingTeam = null; _pendingMatchId = string.Empty; _pendingExpires = 0f; _pendingFlavor = null; }
         // Called only after the factory has released combat target/navigation ownership and its
         // temporary actor/spell collections. The duplicate-safe policy tolerates nested cleanup.
-        internal static void EncounterCleaned() { _lifecycle.BeginCleanup(); _lifecycle.CompleteCleanup(Enabled); }
+        internal static void EncounterCleaned() { ResetMatchCountdown(); _lifecycle.BeginCleanup(); _lifecycle.CompleteCleanup(Enabled); }
         private static bool IsAlive(Character value) { try { return value != null && value.gameObject != null && value.gameObject.activeInHierarchy && value.Alive; } catch { return false; } }
         // An avatar can disappear briefly while the native manager pools or respawns it. CurScene
         // remains the authoritative location signal during that gap, so a same-zone Sim must not
