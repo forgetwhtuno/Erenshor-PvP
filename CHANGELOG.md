@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.10 - per-proxy Start fault isolation
+
+- Fixed a single proxy's native `NPC.Start` failure destroying the entire encounter. A live 5v5 ended
+  `runtime_invalid` 0.1 seconds after GO with `damage_to_defenders=0`: four proxies completed Start,
+  observed their nav coroutine and accepted their defender targets, while one threw a
+  `NullReferenceException` inside `NPC.Start` and the fault queued a whole-team teardown.
+- Root cause of the throw, verified against the installed `Assembly-CSharp`: the final branch of
+  `NPC.Start` reads `ThisSim.Skillbook` with no null guard when
+  `MyStats.CharacterClass == GameData.ClassDB.Stormcaller` (IL_0b43 -> IL_0b5f), looking for the
+  imbued skill slot. A PvP proxy deliberately carries no persistent Sim identity - `ThisSim` is
+  nulled at spawn so the clone can never reach `SimPlayerMngr`'s roster - so every Stormcaller-class
+  proxy throws there. It is the last statement in `Start` (IL_0bb1 is `ret`): navigation, behavior,
+  nameplate, stats, skills and spells are all already established, and the only casualty is the
+  optional `myImbued` slot that a Start-less proxy never had either.
+- A Start fault is now treated as per-proxy evidence rather than proof the encounter is unsound. The
+  fault handler reasserts the same PvP-owned identity/loadout/reward state the Start postfix applies,
+  then requires the same invariants plus resident native nav and behavior coroutine handles. A proxy
+  that proves out keeps fighting and is seeded normally (`proxy_start_recovered`); one that does not
+  is retired alone (`proxy_start_dropped ... attackers_left=N`). The match ends only when no attacker
+  survives.
+- Absence of a coroutine handle is still not treated as health - it is used only as proof that Start
+  faulted *before* its navigation launch and therefore left an incomplete lifecycle that must not
+  enter combat.
+
+
 ## 0.5.9 - Native NPC lifecycle / navigation recovery
 
 - Restored native `NPC.Start` as the owner of each temporary proxy's complete navigation/behavior lifecycle. Proxies remain disabled through countdown; GO releases `NeverAggro` and enables the cloned NPC, then the Start postfix reasserts PvP identity/loadout/reward safety.

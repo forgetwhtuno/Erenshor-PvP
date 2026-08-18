@@ -897,6 +897,22 @@ namespace ErenshorPvP
             PvpCombatContainment.ObserveProxyNativeStartCompleted(npc);
         }
 
+        // A native Start fault is per-proxy evidence, not proof that the encounter is unsound.
+        //
+        // Verified against the installed Assembly-CSharp, NPC.Start's FINAL branch is:
+        //   IL_0b43  if (MyStats.CharacterClass == GameData.ClassDB.Stormcaller)
+        //   IL_0b5a      foreach (SimPlayerSkillSlot slot in ThisSim.Skillbook)   <- no null guard
+        //   IL_0b91          if (slot.skill.Id == "58018670") myImbued = slot;
+        //   IL_0bb1  ret
+        // A PvP proxy deliberately carries no persistent Sim identity (ThisSim is nulled at spawn so
+        // the clone can never touch SimPlayerMngr's roster), so a Stormcaller-class proxy throws
+        // there every time. That is the very last statement of Start: MyNav/MyStats/nameplate/skills/
+        // spells and both native coroutines are already established, and the only casualty is the
+        // optional myImbued slot, which a Start-less proxy never had either.
+        //
+        // So do not assume, and do not tear down five attackers because one faulted. Reassert the
+        // PvP-owned state the postfix would have applied and validate the result. A proxy that still
+        // proves out keeps fighting; one that does not is dropped alone.
         internal static void ObserveNativeNpcStartFailed(NPC npc, Exception exception)
         {
             if (npc == null || !IsTemporaryNpc(npc) || npc.gameObject == null || exception == null) return;
@@ -909,8 +925,99 @@ namespace ErenshorPvP
             }
             probe.Faulted = true;
             probe.FaultType = "NPC.Start/" + exception.GetType().Name;
-            _runtimeInvalidCleanupQueued = true;
-            _runtimeInvalidReason = probe.FaultType;
+
+            string recoveryDetail;
+            if (TryRecoverFaultedProxyStart(npc, out recoveryDetail))
+            {
+                PvpDiagnostics.Log("proxy_start_recovered proxy=" + SafeProxyName(npc) +
+                    "; fault=" + probe.FaultType + "; " + recoveryDetail);
+                return;
+            }
+
+            int remaining = PvpCombatContainment.RemoveAttacker(npc);
+            PvpDiagnostics.Log("proxy_start_dropped proxy=" + SafeProxyName(npc) +
+                "; fault=" + probe.FaultType + "; reason=" + recoveryDetail + "; attackers_left=" + remaining);
+            RetireProxy(npc);
+            if (remaining <= 0)
+            {
+                _runtimeInvalidCleanupQueued = true;
+                _runtimeInvalidReason = "all_proxies_failed_start/" + probe.FaultType;
+            }
+        }
+
+        // The recovery path reasserts exactly what the Start postfix reasserts, then requires the
+        // same invariants plus proof that Start reached its native navigation launch. A coroutine
+        // handle is not runtime health, but its ABSENCE does prove Start faulted before the launch
+        // and therefore left an incomplete lifecycle that must not enter combat.
+        private static bool TryRecoverFaultedProxyStart(NPC npc, out string detail)
+        {
+            detail = string.Empty;
+            try
+            {
+                Character actor = npc.GetComponent<Character>();
+                CastSpell caster = npc.GetComponent<CastSpell>();
+                NavMeshAgent nav = npc.GetComponent<NavMeshAgent>();
+                int teamIndex = TeamClones.IndexOf(npc.gameObject);
+                PvpOpponentProfile profile = teamIndex >= 0 && teamIndex < TeamProfiles.Count ? TeamProfiles[teamIndex] : null;
+
+                npc.ThisSim = null;
+                npc.SimPlayer = false;
+                npc.InGroup = false;
+                npc.NeverAggro = false;
+                ApplyProfileLoadout(npc, profile);
+                ConfigureNativeMaintenanceState(npc, actor, caster, nav);
+                SuppressBorrowedDeathRewards(actor);
+
+                object navDo;
+                bool navLaunched = TryReadField(npc, "navDo", out navDo) && navDo != null;
+                object behDo;
+                bool behaviorLaunched = TryReadField(npc, "behDo", out behDo) && behDo != null;
+                if (!navLaunched || !behaviorLaunched)
+                {
+                    detail = "start_faulted_before_coroutines nav=" + navLaunched + ",behavior=" + behaviorLaunched;
+                    return false;
+                }
+
+                string invariant, reward;
+                if (!ValidateProxyStartupInvariant(npc.gameObject, out invariant)) { detail = "runtime:" + invariant; return false; }
+                if (!ValidateProxyRewardBoundary(npc.gameObject, out reward)) { detail = "reward:" + reward; return false; }
+
+                NativeStartCompleted.Add(npc.gameObject.GetInstanceID());
+                detail = "runtime=pass; reward=pass; coroutines=resident";
+                PvpCombatContainment.ObserveProxyNativeStartCompleted(npc);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                detail = "recovery_threw:" + ex.GetType().Name;
+                return false;
+            }
+        }
+
+        // Take a single unusable proxy out of play without disturbing the rest of the encounter.
+        private static void RetireProxy(NPC npc)
+        {
+            try
+            {
+                GameObject go = npc.gameObject;
+                npc.NeverAggro = true;
+                npc.enabled = false;
+                Character actor = go.GetComponent<Character>();
+                if (actor != null) actor.enabled = false;
+                CastSpell caster = go.GetComponent<CastSpell>();
+                if (caster != null) caster.enabled = false;
+                NavMeshAgent nav = go.GetComponent<NavMeshAgent>();
+                if (nav != null) nav.enabled = false;
+                int index = TeamClones.IndexOf(go);
+                if (index >= 0)
+                {
+                    TeamClones.RemoveAt(index);
+                    if (index < TeamProfiles.Count) TeamProfiles.RemoveAt(index);
+                }
+                if (_clone == go) _clone = TeamClones.Count > 0 ? TeamClones[0] : null;
+                UnityEngine.Object.Destroy(go);
+            }
+            catch { }
         }
 
         internal static bool ValidateProxyRewardBoundary(GameObject go, out string reason)

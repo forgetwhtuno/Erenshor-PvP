@@ -582,6 +582,27 @@ namespace ErenshorPvP
             }
         }
 
+        // One proxy losing its native Start must not destroy the encounter. Remove just that
+        // attacker and report how many remain; the caller ends the match only when none are left.
+        internal static int RemoveAttacker(NPC npc)
+        {
+            if (npc == null) return EnemyNpcs.Count;
+            int index = EnemyNpcs.IndexOf(npc);
+            if (index >= 0)
+            {
+                EnemyNpcs.RemoveAt(index);
+                if (index < EnemyActors.Count) EnemyActors.RemoveAt(index);
+            }
+            if (EnemyNpcs.Count > 0 && _cloneNpc == npc)
+            {
+                _cloneNpc = EnemyNpcs[0];
+                _cloneActor = EnemyActors.Count > 0 ? EnemyActors[0] : null;
+            }
+            return EnemyNpcs.Count;
+        }
+
+        internal static bool LethalAttackersRemain { get { return _lethalFight && EnemyNpcs.Count > 0; } }
+
         private static void AddPartyDefenders()
         {
             try
