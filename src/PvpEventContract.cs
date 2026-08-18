@@ -139,8 +139,9 @@ namespace ErenshorPvP
             lock (ResultLock) return RecentEncoded.ToArray();
         }
 
-        // Maps a raw PvP outcome token onto a classification. Internal failures, third-party
-        // interference, spawn failures and cancellations are never reported as escapes.
+        // Maps a raw PvP outcome token onto a classification. Internal failures, spawn failures and
+        // cancellations are never reported as escapes. `third_party_aggro` remains recognized only
+        // as a legacy invalid outcome token from pre-0.5.8 builds; active world combat no longer emits it.
         public static string ClassifyOutcome(string outcome)
         {
             string value = (outcome ?? string.Empty).Trim().ToLowerInvariant();

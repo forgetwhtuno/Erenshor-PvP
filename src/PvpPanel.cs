@@ -15,17 +15,17 @@ namespace ErenshorPvP
     {
         private const int SortingOrder = 520;
         private const float PanelWidth = 470f;
-        private const float PanelHeight = 520f;
-        private const float HeaderHeight = 34f;
+        private const float PanelHeight = PvpWindowChromePolicy.ExpandedHeight;
+        private const float HeaderHeight = PvpWindowChromePolicy.HeaderHeight;
         private const float TabHeight = 30f;
-        private const float LauncherWidth = 148f;
-        private const float LauncherHeight = 32f;
+        private const float LauncherWidth = StandaloneLauncherVisual.Width;
+        private const float LauncherHeight = StandaloneLauncherVisual.Height;
 
         private static GameObject _root;
         private static Canvas _canvas;
         private static RectTransform _panel;
         private static RectTransform _launcher;
-        private static RectTransform _header, _headerGrip, _closeRect, _tabs, _viewport, _content, _footer;
+        private static RectTransform _header, _headerGrip, _collapseChevron, _closeRect, _tabs, _viewport, _content, _footer;
         private static GameObject _panelObject;
         private static GameObject _launcherObject;
         private static TextMeshProUGUI _launcherText;
@@ -69,6 +69,7 @@ namespace ErenshorPvP
         private static bool _built;
         private static bool _panelOpen;
         private static bool _launcherVisible;
+        private static bool _collapsed;
         private static bool _fleeConfirm;
         private static float _fleeConfirmUntil;
         private static float _lastScreenWidth;
@@ -181,7 +182,7 @@ namespace ErenshorPvP
                 try { UnityEngine.Object.DestroyImmediate(_root); } catch { }
             }
             _root = null; _canvas = null; _panel = null; _launcher = null;
-            _header = _headerGrip = _closeRect = _tabs = _viewport = _content = _footer = null;
+            _header = _headerGrip = _collapseChevron = _closeRect = _tabs = _viewport = _content = _footer = null;
             _panelObject = null; _launcherObject = null; _launcherText = null;
             _titleText = null; _statusText = null; _resultText = null; _pendingText = null;
             _fightText = null; _rulesText = null; _scoreText = null; _debugText = null;
@@ -189,7 +190,7 @@ namespace ErenshorPvP
             _enabledButton = null; _arrangedButton = null; _ambushButton = null;
             _toggleVisualInitialized = false;
             _lastActivatedAt = 0d;
-            _built = false; _panelOpen = false; _launcherVisible = false; _fleeConfirm = false;
+            _built = false; _panelOpen = false; _launcherVisible = false; _collapsed = false; _fleeConfirm = false;
         }
 
         internal static string RunSelfTests()
@@ -247,17 +248,19 @@ namespace ErenshorPvP
             _launcher.anchorMin = _launcher.anchorMax = new Vector2(0f, 0f);
             _launcher.pivot = new Vector2(0f, 0f);
 
-            RectTransform grip = CreateRect("Grip", _launcher, new Vector2(18f, LauncherHeight), new Vector2(0f, 0f));
+            RectTransform grip = CreateRect("Grip", _launcher, new Vector2(StandaloneLauncherVisual.GripWidth, LauncherHeight), new Vector2(0f, 0f));
             Image gripImage = grip.gameObject.AddComponent<Image>();
-            gripImage.color = CyanAccent;
+            gripImage.color = StandaloneLauncherVisual.GripBackground;
             PvpDragGuard drag = grip.gameObject.AddComponent<PvpDragGuard>();
             drag.Target = _launcher;
             drag.OnDragCompleted = PersistLauncherPosition;
-            AddText(grip, "⋮", 18, TextAlignmentOptions.Center, Color.white);
+            StandaloneLauncherVisual.StyleGrip(grip);
 
-            RectTransform buttonRect = CreateRect("Open", _launcher, new Vector2(LauncherWidth - 18f, LauncherHeight), new Vector2(18f, 0f));
-            Button button = AddButton(buttonRect, "PvP", delegate { PvpControlApi.TogglePanel(); });
+            RectTransform buttonRect = CreateRect("Open", _launcher, new Vector2(LauncherWidth - StandaloneLauncherVisual.GripWidth, LauncherHeight), new Vector2(StandaloneLauncherVisual.GripWidth, 0f));
+            Button button = AddButton(buttonRect, "PVP [OFF]", delegate { PvpControlApi.TogglePanel(); });
             _launcherText = button.GetComponentInChildren<TextMeshProUGUI>();
+            StandaloneLauncherVisual.StyleButton(button, _launcherText);
+            StandaloneLauncherVisual.StyleRoot(_launcher);
         }
 
         private static void BuildPanel()
@@ -271,17 +274,22 @@ namespace ErenshorPvP
             _header = CreateRect("Header", _panel, new Vector2(PanelWidth, HeaderHeight), new Vector2(0f, PanelHeight - HeaderHeight));
             Image headerImage = _header.gameObject.AddComponent<Image>();
             headerImage.color = HeaderFill;
-            _headerGrip = CreateRect("Header Drag Surface", _header, new Vector2(PanelWidth - 46f, HeaderHeight), Vector2.zero);
+            RectTransform collapseRect = CreateRect("Collapse", _header, new Vector2(28f, 24f), new Vector2(5f, 5f));
+            Button collapseButton = AddButton(collapseRect, string.Empty, ToggleCollapsed);
+            _collapseChevron = collapseButton.GetComponent<RectTransform>();
+            StandaloneLauncherVisual.AddVerticalChevron(_collapseChevron, true);
+
+            _headerGrip = CreateRect("Header Drag Surface", _header, new Vector2(PanelWidth - 68f, HeaderHeight), new Vector2(34f, 0f));
             Image headerGripRaycast = _headerGrip.gameObject.AddComponent<Image>();
             headerGripRaycast.color = new Color(0f, 0f, 0f, 0f);
-            _titleText = AddText(_headerGrip, "ERENSHOR PvP", 17, TextAlignmentOptions.MidlineLeft, TitleCyan);
-            SetOffsets(_titleText.rectTransform, 10f, 0f, 0f, 0f);
+            _titleText = AddText(_headerGrip, "PVP", 15, TextAlignmentOptions.MidlineLeft, TitleCyan);
+            SetOffsets(_titleText.rectTransform, 6f, 0f, 0f, 0f);
             PvpDragGuard panelDrag = _headerGrip.gameObject.AddComponent<PvpDragGuard>();
             panelDrag.Target = _panel;
             panelDrag.OnDragCompleted = PersistPanelPosition;
             panelDrag.OnPointerActivated = TouchActivation;
 
-            _closeRect = CreateRect("Close", _header, new Vector2(36f, HeaderHeight - 6f), new Vector2(PanelWidth - 40f, 3f));
+            _closeRect = CreateRect("Close", _header, new Vector2(28f, 24f), new Vector2(PanelWidth - 34f, 5f));
             AddButton(_closeRect, "X", delegate { PvpControlApi.ClosePanel(); });
 
             _tabs = CreateRect("Tabs", _panel, new Vector2(PanelWidth - 16f, TabHeight), new Vector2(8f, PanelHeight - HeaderHeight - TabHeight - 4f));
@@ -391,11 +399,12 @@ namespace ErenshorPvP
         private static void UpdateValues()
         {
             if (!_built) return;
-            if (_launcherText != null) _launcherText.text = PvpController.Enabled ? "PvP  ON" : "PvP  OFF";
-            if (_titleText != null) _titleText.text = "ERENSHOR PvP  •  " + PvpController.HubStatus();
+            if (_launcherText != null) _launcherText.text = !PvpControlApi.RuntimeReady ? "PVP [ERR]" : (PvpController.Enabled ? "PVP [ON]" : "PVP [OFF]");
+            if (_titleText != null) _titleText.text = "ERENSHOR PvP  •  " + PvpControlApi.GetStatus();
             if (_statusText != null)
             {
                 _statusText.text =
+                    (PvpControlApi.RuntimeReady ? string.Empty : "Compatibility: unavailable - gameplay disabled\n") +
                     "PvP: " + OnOff(PvpController.Enabled) + "\n" +
                     "Arranged challenges: " + OnOff(PvpController.ArrangedEnabled) + " (consensual)\n" +
                     "Wild ambushes: " + OnOff(PvpController.AmbushEnabled) + "\n" +
@@ -408,16 +417,19 @@ namespace ErenshorPvP
             bool ambush = PvpController.AmbushEnabled;
             if (_enabledButton != null)
             {
+                _enabledButton.interactable = PvpControlApi.RuntimeReady;
                 SetButtonText(_enabledButton, PvpUiPresentation.ToggleLabel("PvP Enabled", enabled));
                 if (!_toggleVisualInitialized || _lastEnabledVisual != enabled) SetToggleButtonState(_enabledButton, enabled);
             }
             if (_arrangedButton != null)
             {
+                _arrangedButton.interactable = PvpControlApi.RuntimeReady;
                 SetButtonText(_arrangedButton, PvpUiPresentation.ToggleLabel("Arranged Challenges", arranged));
                 if (!_toggleVisualInitialized || _lastArrangedVisual != arranged) SetToggleButtonState(_arrangedButton, arranged);
             }
             if (_ambushButton != null)
             {
+                _ambushButton.interactable = PvpControlApi.RuntimeReady;
                 SetButtonText(_ambushButton, PvpUiPresentation.ToggleLabel("Wild Ambushes", ambush));
                 if (!_toggleVisualInitialized || _lastAmbushVisual != ambush) SetToggleButtonState(_ambushButton, ambush);
             }
@@ -425,7 +437,11 @@ namespace ErenshorPvP
             _lastArrangedVisual = arranged;
             _lastAmbushVisual = ambush;
             _toggleVisualInitialized = true;
-            if (_ambushHereButton != null) SetButtonText(_ambushHereButton, PvpController.AmbushZoneListedHere ? "Stop ambushes here" : "Allow ambushes here");
+            if (_ambushHereButton != null)
+            {
+                _ambushHereButton.interactable = PvpControlApi.RuntimeReady;
+                SetButtonText(_ambushHereButton, PvpController.AmbushZoneListedHere ? "Stop ambushes here" : "Allow ambushes here");
+            }
             bool pending = PvpController.HasPending;
             if (_pendingText != null)
             {
@@ -495,6 +511,44 @@ namespace ErenshorPvP
             foreach (KeyValuePair<PvpPanelTab, Button> kv in TabButtons) if (kv.Value != null) kv.Value.interactable = kv.Key != _tab;
         }
 
+        private static void ToggleCollapsed()
+        {
+            SetCollapsed(!_collapsed);
+        }
+
+        private static void SetCollapsed(bool collapsed)
+        {
+            if (_panel == null || _collapsed == collapsed) return;
+            PvpDragGuard.ForceReleaseIfOwned();
+            float oldHeight = _panel.sizeDelta.y;
+            float oldY = _panel.anchoredPosition.y;
+            _collapsed = collapsed;
+            float newHeight = PvpWindowChromePolicy.Height(_collapsed);
+            ResizePanel(_panel.sizeDelta.x, newHeight);
+            _panel.anchoredPosition = new Vector2(_panel.anchoredPosition.x,
+                PvpWindowChromePolicy.PreserveTopBottomY(oldY, oldHeight, newHeight));
+            ApplyCollapsedVisibility();
+            RebuildCollapseChevron();
+            PersistPanelPosition();
+            TouchActivation();
+        }
+
+        private static void ApplyCollapsedVisibility()
+        {
+            bool bodyVisible = !_collapsed;
+            if (_tabs != null) _tabs.gameObject.SetActive(bodyVisible);
+            if (_viewport != null) _viewport.gameObject.SetActive(bodyVisible);
+            if (_footer != null) _footer.gameObject.SetActive(bodyVisible);
+        }
+
+        private static void RebuildCollapseChevron()
+        {
+            if (_collapseChevron == null) return;
+            for (int i = _collapseChevron.childCount - 1; i >= 0; i--)
+                if (_collapseChevron.GetChild(i).name == "Chevron") UnityEngine.Object.Destroy(_collapseChevron.GetChild(i).gameObject);
+            StandaloneLauncherVisual.AddVerticalChevron(_collapseChevron, PvpWindowChromePolicy.ChevronPointsUp(_collapsed));
+        }
+
         private static void HideAll()
         {
             // Visibility teardown is an ownership boundary. Release before disabling children so
@@ -519,10 +573,16 @@ namespace ErenshorPvP
         private static void ApplyPanelPosition(bool persist)
         {
             if (_panel == null) return;
-            PvpUiRect r = PvpUiGeometry.ResolvePanel(_panelNormX, _panelNormY, Screen.width, Screen.height, PanelWidth, PanelHeight);
-            ResizePanel(r.Width, r.Height);
-            _panel.anchoredPosition = new Vector2(r.X, r.Y);
-            PvpUiGeometry.Normalize(r, Screen.width, Screen.height, out _panelNormX, out _panelNormY);
+            // Persisted coordinates always describe the expanded rect. The collapsed header derives
+            // from that rect so screen changes cannot make expand/collapse drift vertically.
+            PvpUiRect expanded = PvpUiGeometry.ResolvePanel(_panelNormX, _panelNormY, Screen.width, Screen.height, PanelWidth, PanelHeight);
+            float displayHeight = PvpWindowChromePolicy.Height(_collapsed);
+            float displayY = _collapsed
+                ? PvpWindowChromePolicy.PreserveTopBottomY(expanded.Y, expanded.Height, displayHeight)
+                : expanded.Y;
+            ResizePanel(expanded.Width, displayHeight);
+            _panel.anchoredPosition = new Vector2(expanded.X, displayY);
+            PvpUiGeometry.Normalize(expanded, Screen.width, Screen.height, out _panelNormX, out _panelNormY);
             if (persist) PersistPanelPosition();
         }
 
@@ -541,8 +601,8 @@ namespace ErenshorPvP
             if (_panel == null) return;
             _panel.sizeDelta = new Vector2(width, height);
             if (_header != null) { _header.sizeDelta = new Vector2(width, HeaderHeight); _header.anchoredPosition = new Vector2(0f, height - HeaderHeight); }
-            if (_headerGrip != null) _headerGrip.sizeDelta = new Vector2(Math.Max(80f, width - 46f), HeaderHeight);
-            if (_closeRect != null) _closeRect.anchoredPosition = new Vector2(Math.Max(4f, width - 40f), 3f);
+            if (_headerGrip != null) { _headerGrip.sizeDelta = new Vector2(Math.Max(80f, width - 68f), HeaderHeight); _headerGrip.anchoredPosition = new Vector2(34f, 0f); }
+            if (_closeRect != null) _closeRect.anchoredPosition = new Vector2(Math.Max(4f, width - 34f), 5f);
             if (_tabs != null) { _tabs.sizeDelta = new Vector2(Math.Max(80f, width - 16f), TabHeight); _tabs.anchoredPosition = new Vector2(8f, height - HeaderHeight - TabHeight - 4f); }
             float tabWidth = Math.Max(16f, (width - 16f) / 5f);
             foreach (KeyValuePair<PvpPanelTab, Button> kv in TabButtons)
@@ -561,10 +621,14 @@ namespace ErenshorPvP
         private static void PersistPanelPosition()
         {
             if (_panel == null) return;
-            PvpUiRect r = new PvpUiRect(_panel.anchoredPosition.x, _panel.anchoredPosition.y, _panel.sizeDelta.x, _panel.sizeDelta.y);
-            r = PvpUiGeometry.Clamp(r, Screen.width, Screen.height);
-            _panel.anchoredPosition = new Vector2(r.X, r.Y);
-            PvpUiGeometry.Normalize(r, Screen.width, Screen.height, out _panelNormX, out _panelNormY);
+            PvpUiRect display = new PvpUiRect(_panel.anchoredPosition.x, _panel.anchoredPosition.y, _panel.sizeDelta.x, _panel.sizeDelta.y);
+            display = PvpUiGeometry.Clamp(display, Screen.width, Screen.height);
+            _panel.anchoredPosition = new Vector2(display.X, display.Y);
+            float expandedY = _collapsed
+                ? PvpWindowChromePolicy.PreserveTopBottomY(display.Y, display.Height, PanelHeight)
+                : display.Y;
+            PvpUiRect expanded = PvpUiGeometry.Clamp(new PvpUiRect(display.X, expandedY, PanelWidth, PanelHeight), Screen.width, Screen.height);
+            PvpUiGeometry.Normalize(expanded, Screen.width, Screen.height, out _panelNormX, out _panelNormY);
             if (_persistPanel != null) _persistPanel(_panelNormX, _panelNormY);
         }
 

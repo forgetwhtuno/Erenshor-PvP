@@ -86,7 +86,7 @@ namespace ErenshorPvP
                 AppendField(sb, "module", PvpControlApi.ModuleId);
                 AppendField(sb, "display", "Erenshor PvP");
                 AppendField(sb, "version", _version);
-                AppendField(sb, "summary", s.Enabled ? "World PvP enabled" : "World PvP disabled");
+                AppendField(sb, "summary", !PvpControlApi.RuntimeReady ? "PvP compatibility unavailable" : (s.Enabled ? "World PvP enabled" : "World PvP disabled"));
                 AppendField(sb, "status", PvpControlApi.GetStatus());
                 if (s.ProtectedHere) AppendField(sb, "warning", "Protected zone - PvP disabled here");
                 AppendField(sb, "actions", "openPanel,closePanel,resetPanel,resetLauncher");

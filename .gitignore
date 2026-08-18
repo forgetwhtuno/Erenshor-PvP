@@ -5,3 +5,6 @@ obj/
 # Local reference assemblies copied from the installed game and BepInEx profile.
 # These are not redistributable; BUILD_AND_INSTALL.ps1 resolves them at build time.
 refs/
+
+# Local build staging output from BUILD_AND_INSTALL.ps1.
+build-output/

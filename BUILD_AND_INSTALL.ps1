@@ -1,6 +1,8 @@
 ﻿param(
     [string]$GameDir = "",
-    [string]$LunarisLibDir = ""
+    [string]$LunarisLibDir = "",
+    # Compile and report the candidate SHA-256 without touching the installed plugin.
+    [switch]$BuildOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,12 +36,39 @@ New-Item -ItemType Directory -Force -Path $pluginDir | Out-Null
 $refs = @((Join-Path $LunarisLibDir "Lunaris.dll"),(Join-Path $LunarisLibDir "0Harmony.dll"),(Join-Path $managed "Assembly-CSharp.dll"),(Join-Path $managed "netstandard.dll"),(Join-Path $managed "UnityEngine.dll"),(Join-Path $managed "UnityEngine.CoreModule.dll"),
     (Join-Path $managed "UnityEngine.UIModule.dll"),(Join-Path $managed "UnityEngine.AIModule.dll"),(Join-Path $managed "UnityEngine.AnimationModule.dll"),(Join-Path $managed "UnityEngine.PhysicsModule.dll"),(Join-Path $managed "UnityEngine.UI.dll"),(Join-Path $managed "UnityEngine.TextRenderingModule.dll"),(Join-Path $managed "UnityEngine.InputLegacyModule.dll"),(Join-Path $managed "Unity.TextMeshPro.dll"))
 foreach ($ref in $refs) { if (-not (Test-Path $ref)) { throw "Missing reference: $ref" } }
-$out = Join-Path $pluginDir "ErenshorPvP.dll"; $rsp = Join-Path $env:TEMP "ErenshorPvP.rsp"; $lines = @('/nologo','/target:library','/optimize+',('/out:"{0}"' -f $out)); $refs | ForEach-Object { $lines += ('/reference:"{0}"' -f $_) }; Get-ChildItem (Join-Path $ScriptRoot "src") -Filter "*.cs" | ForEach-Object { $lines += ('"' + $_.FullName + '"') }
+$out = Join-Path $pluginDir "ErenshorPvP.dll"
+# Compile to a staging path first. The previous script compiled straight into <Erenshor>\plugins, so a
+# failed/partial compile could leave a broken DLL where Lunaris scans, and an install could silently
+# replace the plugin while the game held it loaded.
+$buildOutputDir = Join-Path $ScriptRoot "build-output"
+New-Item -ItemType Directory -Force -Path $buildOutputDir | Out-Null
+$staged = Join-Path $buildOutputDir "ErenshorPvP.dll"
+$rsp = Join-Path $env:TEMP "ErenshorPvP.rsp"; $lines = @('/nologo','/target:library','/optimize+',('/out:"{0}"' -f $staged)); $refs | ForEach-Object { $lines += ('/reference:"{0}"' -f $_) }; Get-ChildItem (Join-Path $ScriptRoot "src") -Filter "*.cs" | ForEach-Object { $lines += ('"' + $_.FullName + '"') }
 # Cross-mod contract conformance tests, shared with Erenshor Nemesis and Deep Sims. Optional so a
 # standalone copy of this mod still builds; the self-test simply covers less without it.
 $shared = Join-Path (Split-Path -Parent $ScriptRoot) "shared"
 if (Test-Path $shared) { $lines += '/define:SHARED_CONTRACTS'; Get-ChildItem $shared -Filter "*.cs" | ForEach-Object { $lines += ('"' + $_.FullName + '"') } }
 $lines | Set-Content $rsp -Encoding ASCII
 & $csc "@$rsp"; if ($LASTEXITCODE -ne 0) { throw "Compilation failed." }
+if (-not (Test-Path $staged)) { throw "Compiler reported success but produced no assembly at $staged" }
+$stagedHash = (Get-FileHash -Algorithm SHA256 -Path $staged).Hash.ToLowerInvariant()
+Write-Host "Built Erenshor PvP candidate: $staged" -ForegroundColor Green
+Write-Host "  candidate SHA256: $stagedHash"
+
+if ($BuildOnly) {
+    if (Test-Path $out) {
+        Write-Host "  installed SHA256: $((Get-FileHash -Algorithm SHA256 -Path $out).Hash.ToLowerInvariant())"
+    } else { Write-Host "  no DLL currently installed at $out" }
+    Write-Host "BuildOnly: nothing installed." -ForegroundColor Yellow
+    return
+}
+
+if (@(Get-Process -Name "Erenshor" -ErrorAction SilentlyContinue).Count -gt 0) {
+    throw "Erenshor is running. Refusing to replace the installed plugin DLL - close the game, or rerun with -BuildOnly."
+}
+Copy-Item -LiteralPath $staged -Destination $out -Force
+$installedHash = (Get-FileHash -Algorithm SHA256 -Path $out).Hash.ToLowerInvariant()
 Write-Host "Installed Erenshor PvP to $out" -ForegroundColor Green
+Write-Host "  installed SHA256: $installedHash"
+if ($installedHash -ne $stagedHash) { throw "Installed DLL hash does not match the built candidate." }
 

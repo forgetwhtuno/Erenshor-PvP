@@ -1,5 +1,178 @@
 # Changelog
 
+## 0.5.10 - per-proxy Start fault isolation
+
+- Fixed a single proxy's native `NPC.Start` failure destroying the entire encounter. A live 5v5 ended
+  `runtime_invalid` 0.1 seconds after GO with `damage_to_defenders=0`: four proxies completed Start,
+  observed their nav coroutine and accepted their defender targets, while one threw a
+  `NullReferenceException` inside `NPC.Start` and the fault queued a whole-team teardown.
+- Root cause of the throw, verified against the installed `Assembly-CSharp`: the final branch of
+  `NPC.Start` reads `ThisSim.Skillbook` with no null guard when
+  `MyStats.CharacterClass == GameData.ClassDB.Stormcaller` (IL_0b43 -> IL_0b5f), looking for the
+  imbued skill slot. A PvP proxy deliberately carries no persistent Sim identity - `ThisSim` is
+  nulled at spawn so the clone can never reach `SimPlayerMngr`'s roster - so every Stormcaller-class
+  proxy throws there. It is the last statement in `Start` (IL_0bb1 is `ret`): navigation, behavior,
+  nameplate, stats, skills and spells are all already established, and the only casualty is the
+  optional `myImbued` slot that a Start-less proxy never had either.
+- A Start fault is now treated as per-proxy evidence rather than proof the encounter is unsound. The
+  fault handler reasserts the same PvP-owned identity/loadout/reward state the Start postfix applies,
+  then requires the same invariants plus resident native nav and behavior coroutine handles. A proxy
+  that proves out keeps fighting and is seeded normally (`proxy_start_recovered`); one that does not
+  is retired alone (`proxy_start_dropped ... attackers_left=N`). The match ends only when no attacker
+  survives.
+- Absence of a coroutine handle is still not treated as health - it is used only as proof that Start
+  faulted *before* its navigation launch and therefore left an incomplete lifecycle that must not
+  enter combat.
+
+
+## 0.5.9 - Native NPC lifecycle / navigation recovery
+
+- Restored native `NPC.Start` as the owner of each temporary proxy's complete navigation/behavior lifecycle. Proxies remain disabled through countdown; GO releases `NeverAggro` and enables the cloned NPC, then the Start postfix reasserts PvP identity/loadout/reward safety.
+- Removed manual `NavUpdate`/`BehaviorUpdate` coroutine construction/startup. A returned coroutine handle is no longer treated as runtime-health proof.
+- Fixed the nav regression this restoration introduced: countdown disables the proxy `NavMeshAgent`, and native `Start` launches `NavUpdate` but does not re-enable a component PvP turned off. `UpdateNav` therefore faulted on its first destination write, every proxy tripped complete-nav-failure, and the match ended as `technical_failure_ai_inactive` with the attackers stationary. GO now re-enables the agent (and clears `isStopped` when on-mesh) before the NPC is enabled, so native `Start`'s `NavUpdate` has a live agent. Coroutine construction remains native-owned.
+- Added bounded native navigation health telemetry: Start completion, coroutine observation, `UpdateNav` entry/first successful completion, agent/on-mesh state, destination/path evidence, movement evidence, and fault type. Complete proxy-team nav failure terminates as `technical_failure_ai_inactive` with no rewards/history credit.
+- Preserved 0.5.8 world-combat expansion, narrow protected-neutral filtering, countdown/GO semantics, self/ally healing, nameplate invariants, and reward suppression.
+
+
+## 0.5.8 - MMO world-combat participation policy
+
+- Removed the isolation-era `third_party_aggro` termination path. Active PvP no longer ends or despawns
+  simply because an ordinary Sim, pet, hostile mob, or other native combat-capable world actor acquires
+  aggro, attacks, heals, takes damage, or otherwise joins the live combat graph.
+- Removed the `player_in_combat` offer gate so an arranged challenge or eligible ambush can coexist with
+  hostiles already fighting the player/party. Preparation/countdown still protects the temporary proxies
+  from pre-GO interaction while unrelated native world combat continues normally.
+- Added a narrow native-state protection classifier for genuinely neutral/noncombat world actors. Sims and
+  owned/summoned pets are explicitly not protected merely because they are NPC-backed. Verified vendor,
+  invulnerable, `NeverAggro`, resource/chest, and Player/PC/Villager/DEBUG-faction actors are protected;
+  ambiguous actors defer to native behavior rather than being blocked just because they have an `NPC`.
+- Proxy aggro/damage/spell targeting against a protected actor is rejected per interaction and a protected
+  target discovered after native `NPC.Update` is cleared without ending the match. Ordinary world targets
+  remain eligible for native AI target changes after the initial defender seed.
+- AoE/PBAE starts are no longer rejected based on surrounding actors. Untargeted AoE starts pass through;
+  only an actually affected actor that current native state proves protected is filtered by the per-target
+  hooks. No proximity-based recreation of Erenshor faction targeting was added.
+- Outside world damage/healing/aggro involving PvP participants is allowed when native Erenshor permits it.
+  PvP team identity still prevents attacker-team/defender-team friendly fire and cross-team beneficial
+  healing.
+- Spawn formation no longer demands arena-style 8-10m clearance from every NPC-backed actor. Hostile mobs,
+  Sims, and pets only receive a 1.5m physical-overlap buffer; proven protected world actors retain the
+  larger 10m player / 8m spawn safety clearance.
+- Native combat evidence now accepts a permitted world target as a legal acquisition, so world-combat
+  expansion cannot falsely trip the inert-team technical-failure watchdog.
+
+
+## 0.5.7 - arranged GO gate, native engagement proof, and technical-failure safety
+
+- Replaced the implicit spawn -> Active transition with an explicit `Preparing -> Countdown -> GO -> Active`
+  lifecycle. Temporary attackers now enter countdown with `NPC.NeverAggro=true`, spell casting/navigation
+  held, and native maintenance/nameplate updates available; the containment layer also blocks defender
+  aggro, damage, and spell starts against the temporary team before GO.
+- GO is a single main-thread release transition. Every attacker is enabled, native navigation is made
+  available, `NeverAggro` is cleared for the team together, only current-match defender targets are
+  seeded through native `ForceAggroOn`, and the native `NavUpdate`/`BehaviorUpdate` coroutines are
+  launched. Arranged matches show 3-2-1-GO; wild ambushes retain their immediate-start presentation.
+  No custom movement or combat AI was added.
+- Hardened the 0.5.6 coroutine repair: `behDo` and `navDo` are now verified/started independently. A
+  non-null behavior handle can no longer short-circuit the helper while navigation is absent (the native
+  `NPC.Start` path can legitimately create exactly that state when `NeverAggro=true`). Live-clone borrowed
+  coroutine handles are cleared before GO, and GO fails closed unless both native behavior and nav handles
+  are resident for every attacker.
+- Added bounded, first-hit native-combat diagnostics for `NPC.Update`, combat-section entry, legal target
+  acquisition, native pursuit, melee decisions/attempts, attack-skill/spell decisions, heal checks, spell
+  starts, damage to a defender, healing to an attacker, and `NPC.Update` exceptions.
+- Added a six-second post-GO engagement watchdog. A combat-section entry alone is diagnostic and does not
+  satisfy the watchdog; valid evidence requires native target acquisition after Update, pursuit, melee/attack
+  evaluation, heal/support evaluation, a spell start, effective defender damage, or effective attacker
+  healing. If no attacker reaches any such signal, or the entire attacker team is defeated before
+  engagement, the match ends as
+  `technical_failure_ai_inactive` with winner none, zero PvP XP/gold, no win/stat/history credit, and no
+  victory reward.
+- Removed the historical blanket `NoSelfHeal=true` policy. Native self-heals, allied attacker healing,
+  HoTs/lifesteal, and support behavior remain available; cross-team spell healing and outside assistance
+  are blocked by participant ownership.
+- Friendly same-side defender/pet aggro or damage is blocked without being misclassified as third-party
+  interference. Unrelated world interference retains the fail-safe cancellation policy.
+- Expanded deterministic policy/source-guard coverage for plugin identity, countdown/GO ownership,
+  pre-GO attack holds, native engagement evidence, technical-failure reward safety, healing semantics,
+  participant/pet ownership, repeated matches, and duplicate-safe cleanup.
+
+
+## 0.5.6 - native behaviour coroutine repair (second bypassed-Start defect)
+
+- Fixed the residual "attackers stand still" behaviour that survived the 0.5.5 nameplate repair. The
+  0.5.5 live 5v5 proved the nameplate fix worked - `HandleNameTag` NREs went 1130 -> 0 and
+  `namePlateTxt=True; namePlateObject=True` - yet attackers still produced
+  `damage_to_defenders=0`, `attack_spell_decisions=0`, `heal_checks=0`, `spell_starts=0` over a full
+  78-second match. Root cause: **none of the combat AI runs in `NPC.Update` at all.** Verified against
+  the installed `Assembly-CSharp.dll`, the decision chain is
+  `NPC.BehaviorUpdate(0.1f)` (a coroutine) -> `DoNonRaidBehavior`/`DoRaidBehavior` -> `Combat` ->
+  `DoAttackSpell`/`DoAttackSkill`/`PerformMeleeHit`, and `CheckHeals`/`CheckBuffs`.
+- `NPC.Start` (IL_07AA-07F4) is the only place that launches it:
+  `if (!NeverAggro) { navDo = NavUpdate(0.3f); StartCoroutine(navDo); }` followed by
+  `behDo = BehaviorUpdate(0.1f); StartCoroutine(behDo);`. A live-cloned proxy deliberately skips that
+  `Start`, so **neither the behaviour nor the navigation coroutine was ever started** - the proxy could
+  hold a valid, successfully forced aggro target and still never evaluate a single attack, spell or heal.
+  This was a second, independent consequence of the same bypassed-`Start` decision that caused the
+  nameplate defect.
+- Registered temporary proxies now start both native coroutines at combat activation (not at spawn, so
+  proxies stay inert while preparing), mirroring `Start`'s ordering and its `NeverAggro` guard on the nav
+  coroutine. The call is idempotent - a proxy can never run two behaviour coroutines - and new
+  `proxy_behavior_coroutines started=N/M` telemetry reports how many are actually resident.
+- Fixed the startup banner reporting a stale hardcoded version. `ErenshorPvPPlugin` logged a literal
+  `0.5.4` while the running assembly was genuinely `0.5.5`, which made the load line useless for
+  confirming which DLL was live - the exact check live acceptance depends on. The banner and the runtime
+  revision marker now derive from the `LunarisPlugin` attribute, so they can never drift from the build
+  again.
+
+
+## 0.5.5 - proxy nameplate runtime repair (inert-attacker root cause)
+
+- Fixed the defect that made an entire arranged attacker team stand still, never fight back, and still
+  hand the player a victory. Verified against the installed `Assembly-CSharp.dll`: `NPC.Update` calls
+  `HandleNameTag()` as its **third** statement - before the `NeverAggro` early-out and before every
+  combat call - and `HandleNameTag` dereferences `NPC.NamePlateTxt` (`TMPro.TextMeshPro`) through
+  `callvirt Behaviour.get_enabled()` in every branch. `NPC.Update` has no exception handler, so a null
+  `NamePlateTxt` threw every frame and the whole combat/aggro/nav half of `Update` never executed once.
+  That is the single cause of the observed `damage_to_defenders=0`, `heal_checks=0`,
+  `attack_spell_decisions=0`, `spell_starts=0`, and the ~1,130 `NPC.HandleNameTag` NREs in one 7-second
+  match.
+- Whole-assembly field-access scan proved `NamePlateTxt`/`NamePlateObject` are written **only** by
+  `NPC.Start` and read **only** by `HandleNameTag`. A live-cloned PvP proxy deliberately skips that
+  `Start` (`PvpProxyStartupPolicy.ShouldRunNativeNpcStart`), and `ConfigureNativeMaintenanceState`
+  restored the other Start-owned references (`Myself`, `MyStats`, `MySpells`, `MyNav`, `MyCharControl`,
+  `MyRaidSlot`, `NameFlash`) but not these two. `UpdateNamePlate()` could not compensate because it
+  early-returns when `ThisSim == null`, which is always true for a non-persistent proxy.
+- Registered temporary proxies now rebuild the nameplate presentation natively, reproducing
+  `NPC.Start`'s own recipe in order: reuse the clone's own nameplate when it survived cloning,
+  otherwise instantiate the same `GameData.GM.GetComponent<Misc>().NamePlate` prefab, bind
+  `NamePlateTxt`/`NamePlateObject` from it, point `NamePlate.MyStats`/`.Myself` back at the proxy, set
+  the plate text to `NPCName`, and re-parent it under the proxy. A candidate whose transform is not a
+  descendant of the proxy root is rejected, so a proxy can never bind - and mutate - the original live
+  template NPC's nameplate.
+- Extended `requiredRuntimeState` to validate `hasNamePlateTxt` and `hasNamePlateObject`. The previous
+  invariant only proved `hasNameFlash`, which is a **different field** (`FlashUIColors`) from the one
+  `HandleNameTag` dereferences - which is exactly how the broken match logged `nameFlash=True` and
+  `requiredRuntimeState=PASS` while every proxy was still guaranteed to throw on its first frame. A
+  proxy missing either reference now fails preparation instead of reaching combat. Proxy and template
+  telemetry both report the two new fields separately.
+- Quarantined two stale duplicate `ErenshorPvP` DLLs (both plugin version 0.5.2) that had been left in
+  the Lunaris scan root with live `.dll` extensions and were producing the two
+  `Plugin already loaded: 'ErenshorPvP'` startup errors. They were moved out of the scan root and out of
+  Git rather than deleted; exactly one `ErenshorPvP` assembly identity now exists under the game tree.
+- `BUILD_AND_INSTALL.ps1` now compiles to `build-output/` and installs as a separate verified step,
+  refuses to replace the installed DLL while Erenshor is running, and reports/compares candidate vs
+  installed SHA-256. It previously compiled straight into `<Erenshor>\plugins`, so a failed compile could
+  leave a broken assembly where Lunaris scans.
+
+
+## 0.5.4 - Forgotten Roads release/discoverability correctness
+
+- Preserved the narrow temporary-proxy `NPC.HandleMaintenaceAndCounters` containment repair; no native combat-math redesign.
+- Added the Forgotten Roads retained-uGUI module header contract to the PvP panel: one robust chevron left of `PVP`, header-only collapse, and X close.
+- Collapse/expand preserves the panel top edge, keeps drag/camera ownership cleanup, and hides the body while collapsed.
+- Release/live acceptance remains required for two consecutive 5v5 matches and reward/cleanup proof.
+
 ## 0.5.2 - Suite close contract / drag release hardening
 
 - Added the missing Suite `ui.state` Aura provider for the retained PvP panel, including actual Canvas sort order and activation time; existing `closePanel` is now a complete quick-close contract.
@@ -183,3 +356,7 @@
 - Kept standalone commands and core gameplay authority intact.
 - Documented the retained panel/launcher policy and Lunaris live-test requirement.
 - Reworked only panel/launcher interaction: runtime Rect now owns drag position, header-only drag persists after the gesture, and camera/target containment covers the full drag. PvP gameplay paths are unchanged.
+## 0.5.3 - Forgotten Roads launcher/header chrome
+
+- Standardized the standalone retained-uGUI launcher at 154x32 with restrained `[ON]`/`[OFF]` status and programmatic grip marks.
+- Standardized compact title and close-button dimensions without changing PvP gameplay or panel contents.

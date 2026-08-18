@@ -4,17 +4,25 @@ Part of the **Forgotten Roads for Erenshor** mod collection.
 
 Standalone MMO-style PvP encounters for Erenshor. Practice Duels remains friendly, consensual, and non-lethal for Sims already in the zone. Erenshor PvP selects off-map Sim profiles and runs lethal encounters with normal player death and respawn. World PvP contains both consensual arranged matches and rare non-consensual wild ambushes.
 
-Current development line: 0.5.2. Remaining work is tracked in [docs/PVP_TODO.md](docs/PVP_TODO.md); the most important remaining gate is live in-game validation of native combat, visuals, rewards, and the retained-uGUI panel.
+Current development line: 0.5.9. Remaining work is tracked in [docs/PVP_TODO.md](docs/PVP_TODO.md); the most important remaining gate is live in-game validation of native combat, visuals, rewards, and the retained-uGUI panel.
 
 ### Temporary proxy startup boundary
 
-Synthetic PvP combat roots cloned from an already-running live scene NPC do not replay that
-borrowed creature's `NPC.Start` lifecycle after being converted into a non-persistent PvP identity.
-The bypass is registered-proxy-only and live-source-only; ordinary NPCs are untouched and
-resource-prefab proxies retain native startup until that lifecycle is proven separately. Before
-lethal combat, PvP verifies the Character/NPC/Stats/CastSpell/NavMesh graph and reasserts/verifies
-the no-XP/boss-XP/quest/faction/loot reward boundary. Runtime diagnostics identify proxy native-start
-entry/completion and summarize attack/heal checks and spell starts without changing balance.
+Version 0.5.9 restores the cloned proxy's own native `NPC.Start` lifecycle instead of bypassing
+Start and manually manufacturing `NavUpdate` / `BehaviorUpdate` coroutines. Temporary NPCs remain
+disabled through preparation/countdown. At GO, `NeverAggro` is released and each NPC is enabled;
+Unity/native `NPC.Start` binds and launches the complete native lifecycle. A scoped Start postfix
+then reasserts only PvP-owned synthetic identity, class loadout, nameplate ownership, and no-reward
+constraints before the initial defender target is seeded through native aggro.
+
+The previous `nav=5/5` check proved only that coroutine handles had been assigned. The 0.5.9 bounded
+probe instead records native Start completion, native nav coroutine observation, `NPC.UpdateNav`
+entry, first successful `UpdateNav` completion, NavMeshAgent enabled/on-mesh state, destination/path
+evidence, movement evidence, and fault type. A proxy team whose native nav path completely faults
+fails closed as `technical_failure_ai_inactive` with no winner/reward/history credit. The existing
+proxy-owned `NamePlateTxt` / `NamePlateObject` invariant remains enforced so restoring native Start
+does not reintroduce the earlier `HandleNameTag` failure.
+
 
 ## Status: native Lunaris migration candidate
 
@@ -34,7 +42,7 @@ available in this repository's Git history for anyone still on BepInEx.
 - Panel tabs: **STATUS** (master PvP/arranged/ambush switches, zone safety, ambush-zone control, pending Accept/Refuse), **FIGHT** (live encounter roster plus two-step Flee confirmation), **RULES** (party-size/level context and safe ambush cadence steppers), **SCORE** (record/reward state), and optional **DEBUG** (bounded runtime verification only; spawn/despawn probes remain command-only).
 - Local Sims are never turned hostile. Only profiles outside the current zone can lead or join an attacking party; native `CurScene` tracking keeps a briefly pooled/inactive same-zone Sim from being misclassified as off-map.
 - Arranged party/guild offers identify the leader, composition, and motive and require Accept or Refuse.
-- Wild ambushes do not ask for match consent after world PvP has been enabled. They start automatically, only in the exact `Ambush/Zones` allowlist, never in protected areas or during existing combat. Natural opportunities use a randomized 15-35 minute interval and a 50% roll by default, so ambushes remain uncommon.
+- Wild ambushes do not ask for match consent after world PvP has been enabled. They start automatically, only in the exact `Ambush/Zones` allowlist and never in protected areas. Existing native world combat is allowed to remain active and can become part of the same combat graph. Natural opportunities use a randomized 15-35 minute interval and a 50% roll by default, so ambushes remain uncommon.
 - Ambush text reflects a verified Hunt Camp claim, killing spree, territorial attack, or guild raid. Camp claims require Campmaster to verify an active Hunt Camp; otherwise that motive is unavailable.
 - Parties contain 1–5 off-map profiles. Matchmaking uses the average level of the living active defender party for both candidate eligibility and final team validation. Solo defenders may face 1–5, with four- and five-attacker extremes intentionally uncommon; duos face 1–3 and a lone attacker must be at least two levels stronger; trios face 3–5; groups of four or five face a full party of five at or above the defender average when profiles permit.
 - Team construction prefers the leader's guild, then missing combat roles and profiles closest to the defender level. Classes are assigned Vanguard, Striker, Caster, or Support roles, producing diverse parties when the eligible profile pool permits.
@@ -43,8 +51,8 @@ available in this repository's Git history for anyone still on BepInEx.
 - Every lethal encounter writes one `balance_summary` diagnostic at termination with duration, attacker/defender counts, defeated attackers, average enemy level, registered defender pets, actual HP damage dealt to each side, and the pet share of attacker damage. These bounded counters reset after each match and make balance changes evidence-driven.
 - Saved off-map appearance, hair, skin, equipped-item visuals, class, acquired Sim-usable spells, level, guild, and gear score are copied into a bounded encounter snapshot. If an otherwise eligible profile has no resolvable saved equipment, the temporary visual receives deterministic native class-compatible items at or below its level for visible armor and weapon slots. Fallback gear is encounter-only and is never written to the Sim or an Erenshor save. No temporary actor is registered in the Sim roster.
 - Borrowed creature identity, loot, XP, quests, faction changes, pets, procs, and creature skills are removed. Only the profile's verified Sim-usable spell loadout is admitted; the loadout and tuned melee range are reapplied at combat start after native `Start` has finished.
-- PvP offers and spawns require a clear navigable combat area: the player must be at least 10m from unrelated NPCs, each formation point at least 8m away, and all attackers receive a complete NavMesh path from an 11m formation. The selector checks eight directions and fails safely with the nearest-NPC reason when no formation is available.
-- Native pets owned through `Character.Master` by the local player or a living party defender are treated as bounded members of the defender side. Normal Erenshor world combat remains legal: if the player or party attacks an ordinary NPC, that hit is allowed and the separate PvP encounter ends. PvP proxies cannot attack world NPCs, outside NPCs cannot enter the PvP fight, and verified third-party hostility cancels safely. A low-health final attacker has a small chance to disengage, granting no reward.
+- PvP offers and spawns require a navigable formation, but not an isolated arena. Proven protected neutral/noncombat world actors retain a 10m player / 8m spawn safety clearance; ordinary hostile mobs, Sims, pets, and other native world combatants only receive a small 1.5m physical-overlap buffer. All attackers still require a complete NavMesh path from the 11m formation.
+- Native pets owned through `Character.Master` by the local player or a living party defender are treated as defender-side participants, while ordinary MMO-style world combat remains open. Other local Sims, Sim-owned pets, hostile mobs, existing enemies, and other combat-capable world actors may acquire aggro, attack, heal, take AoE damage, and otherwise join the native combat graph without cancelling or despawning the PvP encounter. The mod only intervenes when current native state positively proves a neutral/noncombat actor should be protected (for example a vendor, invulnerable/`NeverAggro` actor, resource object, or known Player/PC/Villager/DEBUG-faction non-Sim); that individual target/effect is rejected or cleared without terminating the match. Untargeted AoE/PBAE starts are not blocked by proximity. A low-health final attacker still has a small chance to disengage, granting no reward.
 - Player death is real and uses Erenshor's normal death/respawn consequences. PvP victory requires every attacker to die.
 - A player may deliberately flee an active encounter with the FIGHT-tab **Flee** button or `/epvp flee`. This safely ends the match, records an escape, and grants no victory reward; staying in the encounter remains lethal.
 - Verified victory grants configurable native XP and gold. XP is reduced for lower-risk matches but hard-capped at the configured fraction of the current level threshold (50% by default); gold scales modestly with attacker count and average opponent level. A persistent 30-minute anti-farm cooldown prevents repeated payouts.
@@ -152,7 +160,7 @@ Native spawn research is documented in [docs/NATIVE_SPAWN_FINDINGS.md](docs/NATI
 
 ## Development note
 
-This project has been developed heavily with AI-assisted coding tools. The goal has been to build features I wanted to use in Erenshor, with development guided through design, testing, playtesting, audits, and iteration against the game. Bug reports, code review, corrections, and contributions from experienced Erenshor modders are welcome.
+The goal is to build features for Erenshor, with development guided through design, testing, playtesting, audits, and iteration against the game. Bug reports, code review, corrections, and contributions from experienced Erenshor modders are welcome.
 
 This is an unofficial, community-made mod for Erenshor and is not affiliated with or endorsed by the game's developer.
 

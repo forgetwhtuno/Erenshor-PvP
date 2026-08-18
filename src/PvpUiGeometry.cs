@@ -21,7 +21,7 @@ namespace ErenshorPvP
     internal static class PvpUiGeometry
     {
         internal const float Unset = -1f;
-        internal const float LauncherWidth = 148f;
+        internal const float LauncherWidth = 154f;
         internal const float LauncherHeight = 32f;
         internal const float PanelWidth = 470f;
         internal const float PanelHeight = 520f;
