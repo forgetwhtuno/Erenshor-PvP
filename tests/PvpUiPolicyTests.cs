@@ -63,6 +63,26 @@ internal static class PvpUiPolicyTests
             Assert(PvpProxyStartupPolicy.ZeroHealingAssessment(1, 3, 0, 0) == "heal_capable_but_no_cast_started", "heal checks without casts remain diagnostic");
             Assert(PvpProxyStartupPolicy.ZeroHealingAssessment(1, 3, 2, 0) == "heal_capable_casting_observed_no_effective_heal", "casting without healing remains diagnostic");
 
+            // 0.5.11 per-proxy ability-use observability. A zero-spell proxy (pure-melee loadout) is
+            // a real, expected outcome and must not be reported as any kind of failure.
+            Assert(PvpProxyStartupPolicy.ProxyAbilityUseAssessment(0, 0, 0, 0, 0, 0, 0, 0) == "no_class_abilities_loaded", "zero-spell proxy is reported accurately, not as a failure");
+            // Spells loaded but the AI never even evaluated them (no decisions, no heal checks).
+            Assert(PvpProxyStartupPolicy.ProxyAbilityUseAssessment(3, 0, 0, 0, 0, 0, 0, 0) == "ability_ai_not_evaluated", "loaded-but-unevaluated is distinguished from never-loaded");
+            // AI evaluated (decisions occurred) but no StartSpell-family cast was ever observed:
+            // distinguishes "spells loaded" from "spells actually started casting".
+            Assert(PvpProxyStartupPolicy.ProxyAbilityUseAssessment(3, 0, 0, 2, 1, 0, 0, 0) == "ability_evaluated_no_cast_started", "evaluated-but-no-cast is distinguished from merely having spells loaded");
+            // Cast started but neither damage nor healing landed.
+            Assert(PvpProxyStartupPolicy.ProxyAbilityUseAssessment(3, 0, 0, 2, 1, 1, 0, 0) == "cast_started_no_effective_outcome", "cast without outcome remains diagnostic, not a pass/fail verdict");
+            // Confirmed use via damage, and separately via healing.
+            Assert(PvpProxyStartupPolicy.ProxyAbilityUseAssessment(3, 0, 0, 2, 1, 1, 40, 0) == "ability_use_confirmed", "effective damage confirms ability use");
+            Assert(PvpProxyStartupPolicy.ProxyAbilityUseAssessment(0, 2, 4, 0, 0, 1, 0, 25) == "ability_use_confirmed", "effective healing confirms ability use");
+            // A heal-capable proxy with heal checks but zero heals is distinguished from one that
+            // never evaluated healing at all - this reuses ZeroHealingAssessment unchanged (already
+            // covered above), and this proves the reuse composes correctly at the per-proxy call site.
+            Assert(PvpProxyStartupPolicy.ZeroHealingAssessment(1, 0, 0, 0) == "heal_ai_not_evaluated" &&
+                PvpProxyStartupPolicy.ZeroHealingAssessment(1, 5, 2, 0) == "heal_capable_casting_observed_no_effective_heal",
+                "heal-checked-but-zero-heals stays distinguishable from never-evaluated at the per-proxy call site");
+
             Assert(PvpWorldCombatPolicy.RunSelfTests().StartsWith("PASS", StringComparison.Ordinal), "MMO-style world-combat expansion policy");
             Assert(!PvpWorldCombatPolicy.IsProtectedNonCombat(true, false, true, true, true, true, true), "local/world Sim identity outranks neutral NPC heuristics");
             Assert(!PvpWorldCombatPolicy.IsProtectedNonCombat(false, true, true, true, true, true, true), "owned/summoned pet identity outranks neutral NPC heuristics");

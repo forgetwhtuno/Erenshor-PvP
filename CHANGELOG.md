@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.5.11 - per-proxy ability-use observability
+
+- Investigated whether the 0.5.10 live-good attackers actually terminate an active fight at 30
+  seconds, as reported. They do not: the only 30-second timers in PvP are `PvpController._pendingExpires`
+  (arranged-challenge offer expiration, before the fight even starts) and
+  `PvpTemporaryCloneFactory._despawnAt` (a pre-GO setup safety despawn - once `BeginLethalFight`
+  actually activates the fight, `_despawnAt` is set to `float.PositiveInfinity` and stops applying
+  entirely). No source change was made for this; inventing a new active-combat timer was explicitly
+  out of scope. See CHANGELOG discussion / live report for the full timer inventory.
+- Added per-proxy ability-use diagnostics so the terminal encounter summary can answer "did this
+  proxy actually evaluate and use its abilities" without dumping a spellbook or logging per frame.
+  Native `NPC` AI, `DoAttackSkill`/`DoAttackSpell`, and `CastSpell.StartSpell` remain fully
+  authoritative; nothing here forces a cast or adds a rotation.
+  - `PvpTemporaryCloneFactory.LogPerProxyAbilitySummary()` logs exactly one bounded
+    `proxy_ability_summary` line per temporary attacker when a fight ends (called once from
+    `PvpCombatContainment.LogBalanceSummary`, alongside the existing whole-team `balance_summary`
+    line): class/profile, admitted offensive/heal spell counts, `CheckHeals` evaluations,
+    `DoAttackSkill`/`DoAttackSpell` decisions, observed `StartSpell`-family starts, effective damage
+    dealt, effective healing done, and two classification labels (`ability_use`, `heal_assessment`).
+  - Effective damage/healing are now attributed per proxy. `PvpCombatContainment` threads the
+    attacker/healer identity across the existing `DamageMe`/`MagicDamageMe`/`BleedDamageMe` ->
+    `Stats.ReduceHP` and `Stats.HealMe(Spell,...)` telemetry boundaries, the same save/restore
+    pattern already used for pet-damage-context attribution, and records into two new per-proxy maps
+    only when the source is a temporary attacker.
+  - Fixed a presentation bug in the existing whole-team `balance_summary`/`BalanceRuntimeSummary`
+    line: it reported the combined `DoAttackSkill` + `DoAttackSpell` decision count under the single
+    label `attack_spell_decisions`, understating how much of that total was actually spell usage.
+    It now reports `attack_skill_decisions` and `attack_spell_decisions` separately from split
+    per-proxy counters; no other field in that line changed.
+  - Added `PvpProxyStartupPolicy.ProxyAbilityUseAssessment(...)`, a pure classification function in
+    the same style as the existing `ZeroHealingAssessment`. It distinguishes "no class abilities
+    loaded" (a real, expected outcome for e.g. a pure-melee loadout - reported accurately, not as a
+    failure) from "loaded but never evaluated" from "evaluated but never cast" from "cast but no
+    measurable outcome landed" from confirmed use. The existing `ZeroHealingAssessment` is reused
+    unchanged at the per-proxy level for the heal-specific classification.
+  - No existing telemetry, decision logic, spawn/countdown/GO lifecycle, world-combat policy, or
+    protected-actor policy was touched; this is additive observability only.
+
 ## 0.5.10 - per-proxy Start fault isolation
 
 - Fixed a single proxy's native `NPC.Start` failure destroying the entire encounter. A live 5v5 ended
