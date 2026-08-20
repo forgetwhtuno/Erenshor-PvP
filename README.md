@@ -4,7 +4,7 @@ Part of the **Forgotten Roads for Erenshor** mod collection.
 
 Standalone MMO-style PvP encounters for Erenshor. Practice Duels remains friendly, consensual, and non-lethal for Sims already in the zone. Erenshor PvP selects off-map Sim profiles and runs lethal encounters with normal player death and respawn. World PvP contains both consensual arranged matches and rare non-consensual wild ambushes.
 
-Current development line: 0.5.9. Remaining work is tracked in [docs/PVP_TODO.md](docs/PVP_TODO.md); the most important remaining gate is live in-game validation of native combat, visuals, rewards, and the retained-uGUI panel.
+Current development line: 0.5.11. Remaining work is tracked in [docs/PVP_TODO.md](docs/PVP_TODO.md); the most important remaining gate is live in-game validation of native combat, visuals, rewards, and the retained-uGUI panel.
 
 ### Temporary proxy startup boundary
 

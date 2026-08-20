@@ -26,11 +26,23 @@ namespace ErenshorPvP
         private static readonly Dictionary<int, int> EligibleCombatSpellCounts = new Dictionary<int, int>();
         private static readonly Dictionary<int, int> EligibleHealSpellCounts = new Dictionary<int, int>();
         private static readonly Dictionary<int, int> AttackDecisionCounts = new Dictionary<int, int>();
+        // Split, per-proxy versions of AttackDecisionCounts (0.5.11). AttackDecisionCounts stays
+        // as-is for the existing combined-evidence consumer (HasAnyNativeCombatEvidence); these two
+        // exist so the terminal summary can report DoAttackSkill vs DoAttackSpell decisions
+        // separately instead of the combined total being mislabeled as spell-only.
+        private static readonly Dictionary<int, int> AttackSkillDecisionCounts = new Dictionary<int, int>();
+        private static readonly Dictionary<int, int> AttackSpellDecisionCounts = new Dictionary<int, int>();
         private static readonly HashSet<int> AttackSkillDecisionLogged = new HashSet<int>();
         private static readonly HashSet<int> AttackSpellDecisionLogged = new HashSet<int>();
         private static readonly Dictionary<int, int> HealCheckCounts = new Dictionary<int, int>();
         private static readonly Dictionary<int, int> SpellStartCounts = new Dictionary<int, int>();
         private static readonly Dictionary<int, int> LastSpellStartFrame = new Dictionary<int, int>();
+        // Per-proxy effective outcome telemetry (0.5.11). Populated from PvpCombatContainment's
+        // existing damage/heal telemetry hooks when the source is identifiable as a temporary
+        // attacker, so "did this proxy's cast actually land" can be answered per proxy instead of
+        // only as a whole-team total.
+        private static readonly Dictionary<int, long> DamageDealtCounts = new Dictionary<int, long>();
+        private static readonly Dictionary<int, long> HealingDoneCounts = new Dictionary<int, long>();
         private static readonly HashSet<int> NativeStartCompleted = new HashSet<int>();
         private sealed class NativeNavProbe
         {
@@ -394,10 +406,14 @@ namespace ErenshorPvP
                 EligibleCombatSpellCounts.Remove(member.GetInstanceID());
                 EligibleHealSpellCounts.Remove(member.GetInstanceID());
                 AttackDecisionCounts.Remove(member.GetInstanceID());
+                AttackSkillDecisionCounts.Remove(member.GetInstanceID());
+                AttackSpellDecisionCounts.Remove(member.GetInstanceID());
                 AttackSkillDecisionLogged.Remove(member.GetInstanceID());
                 AttackSpellDecisionLogged.Remove(member.GetInstanceID());
                 HealCheckCounts.Remove(member.GetInstanceID());
                 SpellStartCounts.Remove(member.GetInstanceID());
+                DamageDealtCounts.Remove(member.GetInstanceID());
+                HealingDoneCounts.Remove(member.GetInstanceID());
                 NativeStartCompleted.Remove(member.GetInstanceID());
                 NativeNavProbes.Remove(member.GetInstanceID());
                 NativeUpdateReached.Remove(member.GetInstanceID());
@@ -408,7 +424,7 @@ namespace ErenshorPvP
                 NativeUpdateExceptionLogged.Remove(member.GetInstanceID());
                 try { UnityEngine.Object.Destroy(member); } catch { }
             }
-            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); EligibleHealSpellCounts.Clear(); AttackDecisionCounts.Clear(); AttackSkillDecisionLogged.Clear(); AttackSpellDecisionLogged.Clear(); HealCheckCounts.Clear(); SpellStartCounts.Clear(); LastSpellStartFrame.Clear(); NativeStartCompleted.Clear(); NativeNavProbes.Clear(); NativeUpdateReached.Clear(); CombatSectionReached.Clear(); LegalTargetAcquired.Clear(); NavPursuitRequested.Clear(); MeleeAttemptCounts.Clear(); NativeUpdateExceptionLogged.Clear(); _runtimeInvalidCleanupQueued = false; _runtimeInvalidReason = string.Empty; DestroyTemporarySpells();
+            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); EligibleHealSpellCounts.Clear(); AttackDecisionCounts.Clear(); AttackSkillDecisionCounts.Clear(); AttackSpellDecisionCounts.Clear(); AttackSkillDecisionLogged.Clear(); AttackSpellDecisionLogged.Clear(); HealCheckCounts.Clear(); SpellStartCounts.Clear(); DamageDealtCounts.Clear(); HealingDoneCounts.Clear(); LastSpellStartFrame.Clear(); NativeStartCompleted.Clear(); NativeNavProbes.Clear(); NativeUpdateReached.Clear(); CombatSectionReached.Clear(); LegalTargetAcquired.Clear(); NavPursuitRequested.Clear(); MeleeAttemptCounts.Clear(); NativeUpdateExceptionLogged.Clear(); _runtimeInvalidCleanupQueued = false; _runtimeInvalidReason = string.Empty; DestroyTemporarySpells();
             ErenshorPvpEvents.Publish(new PvpSemanticEvent("pvp_proxy_despawned", string.Empty, "PvP Proxy",
                 string.Empty, "cleanup", reason ?? "manual"));
             PvpController.EncounterCleaned();
@@ -1116,10 +1132,28 @@ namespace ErenshorPvP
             if (!IsTemporaryNpc(npc) || !PvpCombatContainment.LethalFightActive || npc.NeverAggro) return;
             int id = npc.gameObject.GetInstanceID();
             Increment(AttackDecisionCounts, id);
+            Increment(spellDecision ? AttackSpellDecisionCounts : AttackSkillDecisionCounts, id);
             HashSet<int> logged = spellDecision ? AttackSpellDecisionLogged : AttackSkillDecisionLogged;
             if (logged.Add(id))
                 PvpDiagnostics.Log((spellDecision ? "attack_spell_decision" : "attack_skill_decision") +
                     " proxy=" + SafeProxyName(npc));
+        }
+
+        // Called from PvpCombatContainment's existing damage/heal telemetry once the source is
+        // identified as a temporary attacker (see DamageTelemetryState/HpTelemetryState threading).
+        // Amounts are already clamped non-negative upstream; the <= 0 guard here is defensive only.
+        internal static void RecordDamageDealt(int proxyId, int amount)
+        {
+            if (amount <= 0) return;
+            long before; DamageDealtCounts.TryGetValue(proxyId, out before);
+            DamageDealtCounts[proxyId] = before + amount;
+        }
+
+        internal static void RecordHealingDone(int proxyId, int amount)
+        {
+            if (amount <= 0) return;
+            long before; HealingDoneCounts.TryGetValue(proxyId, out before);
+            HealingDoneCounts[proxyId] = before + amount;
         }
 
         internal static void ObserveHealCheck(NPC npc)
@@ -1196,18 +1230,60 @@ namespace ErenshorPvP
 
         internal static string BalanceRuntimeSummary()
         {
-            int healCapable = 0, healChecks = 0, attackDecisions = 0, spellStarts = 0;
+            // 0.5.11: previously reported the COMBINED skill+spell decision count under the
+            // "attack_spell_decisions" label, which understated how much of that total was actually
+            // spell usage. Both are now reported separately from the split per-proxy counters.
+            int healCapable = 0, healChecks = 0, skillDecisions = 0, spellDecisions = 0, spellStarts = 0;
             for (int i = 0; i < TeamClones.Count; i++)
             {
                 GameObject go = TeamClones[i]; if (go == null) continue; int id = go.GetInstanceID();
                 int value;
                 if (EligibleHealSpellCounts.TryGetValue(id, out value) && value > 0) healCapable++;
                 if (HealCheckCounts.TryGetValue(id, out value)) healChecks += value;
-                if (AttackDecisionCounts.TryGetValue(id, out value)) attackDecisions += value;
+                if (AttackSkillDecisionCounts.TryGetValue(id, out value)) skillDecisions += value;
+                if (AttackSpellDecisionCounts.TryGetValue(id, out value)) spellDecisions += value;
                 if (SpellStartCounts.TryGetValue(id, out value)) spellStarts += value;
             }
             return "heal_capable_attackers=" + healCapable + "; heal_checks=" + healChecks +
-                "; attack_spell_decisions=" + attackDecisions + "; spell_starts=" + spellStarts;
+                "; attack_skill_decisions=" + skillDecisions + "; attack_spell_decisions=" + spellDecisions +
+                "; spell_starts=" + spellStarts;
+        }
+
+        // Bounded per-proxy terminal diagnostic (0.5.11): one line per temporary attacker, logged
+        // exactly once when the fight ends (see PvpCombatContainment.LogBalanceSummary). This is the
+        // "did this proxy actually evaluate and use its abilities" answer the live/aggregate summary
+        // could not give on its own - it never runs per frame and never dumps a spellbook.
+        internal static void LogPerProxyAbilitySummary()
+        {
+            for (int i = 0; i < TeamClones.Count; i++)
+            {
+                GameObject go = TeamClones[i];
+                if (go == null) continue;
+                int id = go.GetInstanceID();
+                PvpOpponentProfile profile = i < TeamProfiles.Count ? TeamProfiles[i] : null;
+                int offensiveSpells, healSpells, healChecks, skillDecisions, spellDecisions, spellStarts;
+                long damageDealt, healingDone;
+                EligibleCombatSpellCounts.TryGetValue(id, out offensiveSpells);
+                EligibleHealSpellCounts.TryGetValue(id, out healSpells);
+                HealCheckCounts.TryGetValue(id, out healChecks);
+                AttackSkillDecisionCounts.TryGetValue(id, out skillDecisions);
+                AttackSpellDecisionCounts.TryGetValue(id, out spellDecisions);
+                SpellStartCounts.TryGetValue(id, out spellStarts);
+                DamageDealtCounts.TryGetValue(id, out damageDealt);
+                HealingDoneCounts.TryGetValue(id, out healingDone);
+                string abilityUse = PvpProxyStartupPolicy.ProxyAbilityUseAssessment(offensiveSpells, healSpells,
+                    healChecks, skillDecisions, spellDecisions, spellStarts, damageDealt, healingDone);
+                string healAssessment = PvpProxyStartupPolicy.ZeroHealingAssessment(healSpells > 0 ? 1 : 0,
+                    healChecks, spellStarts, healingDone);
+                NPC npc = go.GetComponent<NPC>();
+                PvpDiagnostics.Log("proxy_ability_summary proxy=" + SafeProxyName(npc) +
+                    "; profile=" + (profile == null || string.IsNullOrEmpty(profile.ClassName) ? "unknown" : profile.ClassName) +
+                    "; offensive_spells=" + offensiveSpells + "; heal_spells=" + healSpells +
+                    "; heal_checks=" + healChecks + "; attack_skill_decisions=" + skillDecisions +
+                    "; attack_spell_decisions=" + spellDecisions + "; spell_starts=" + spellStarts +
+                    "; damage_dealt=" + damageDealt + "; healing_done=" + healingDone +
+                    "; ability_use=" + abilityUse + "; heal_assessment=" + healAssessment);
+            }
         }
 
         internal static string BalanceHealingAssessment(long healingDone)
@@ -1505,10 +1581,14 @@ namespace ErenshorPvP
                 EligibleCombatSpellCounts.Remove(member.GetInstanceID());
                 EligibleHealSpellCounts.Remove(member.GetInstanceID());
                 AttackDecisionCounts.Remove(member.GetInstanceID());
+                AttackSkillDecisionCounts.Remove(member.GetInstanceID());
+                AttackSpellDecisionCounts.Remove(member.GetInstanceID());
                 AttackSkillDecisionLogged.Remove(member.GetInstanceID());
                 AttackSpellDecisionLogged.Remove(member.GetInstanceID());
                 HealCheckCounts.Remove(member.GetInstanceID());
                 SpellStartCounts.Remove(member.GetInstanceID());
+                DamageDealtCounts.Remove(member.GetInstanceID());
+                HealingDoneCounts.Remove(member.GetInstanceID());
                 NativeStartCompleted.Remove(member.GetInstanceID());
                 NativeNavProbes.Remove(member.GetInstanceID());
                 NativeUpdateReached.Remove(member.GetInstanceID());
@@ -1519,7 +1599,7 @@ namespace ErenshorPvP
                 NativeUpdateExceptionLogged.Remove(member.GetInstanceID());
                 try { UnityEngine.Object.Destroy(member); } catch { }
             }
-            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); EligibleHealSpellCounts.Clear(); AttackDecisionCounts.Clear(); AttackSkillDecisionLogged.Clear(); AttackSpellDecisionLogged.Clear(); HealCheckCounts.Clear(); SpellStartCounts.Clear(); LastSpellStartFrame.Clear(); NativeStartCompleted.Clear(); NativeNavProbes.Clear(); NativeUpdateReached.Clear(); CombatSectionReached.Clear(); LegalTargetAcquired.Clear(); NavPursuitRequested.Clear(); MeleeAttemptCounts.Clear(); NativeUpdateExceptionLogged.Clear(); DestroyTemporarySpells();
+            TeamClones.Clear(); TeamProfiles.Clear(); VisualAnimators.Clear(); EquipmentVisualsApplied.Clear(); ClassLoadoutsApplied.Clear(); EligibleCombatSpellCounts.Clear(); EligibleHealSpellCounts.Clear(); AttackDecisionCounts.Clear(); AttackSkillDecisionCounts.Clear(); AttackSpellDecisionCounts.Clear(); AttackSkillDecisionLogged.Clear(); AttackSpellDecisionLogged.Clear(); HealCheckCounts.Clear(); SpellStartCounts.Clear(); DamageDealtCounts.Clear(); HealingDoneCounts.Clear(); LastSpellStartFrame.Clear(); NativeStartCompleted.Clear(); NativeNavProbes.Clear(); NativeUpdateReached.Clear(); CombatSectionReached.Clear(); LegalTargetAcquired.Clear(); NavPursuitRequested.Clear(); MeleeAttemptCounts.Clear(); NativeUpdateExceptionLogged.Clear(); DestroyTemporarySpells();
             PvpDiagnostics.Log("validation_cleanup match=" + ShortMatch(completedMatchId) +
                 "; proxy_collections=" + TeamClones.Count + "; profile_collections=" + TeamProfiles.Count +
                 "; spell_collections=" + TemporarySpells.Count + "; destroy_scheduled=" + proxyCount);

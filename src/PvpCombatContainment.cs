@@ -27,6 +27,12 @@ namespace ErenshorPvP
         private static long _healingToAttackers;
         private static long _healingToDefenders;
         private static bool _damageContextPet;
+        // Instance id of the temporary attacker currently dealing damage, 0 = none/unattributed.
+        // Threaded across the DamageMe/MagicDamageMe/BleedDamageMe -> Stats.ReduceHP call boundary
+        // the exact same way _damageContextPet already is (save/restore around the nested call), so
+        // per-proxy "effective damage dealt" can be attributed at the point the real HP delta is
+        // known (0.5.11 observability; see PvpTemporaryCloneFactory.RecordDamageDealt).
+        private static int _damageSourceProxyId;
         private static int _healTelemetryDepth;
         private static bool _loggedDamageToDefender;
         private static bool _loggedHealToAttacker;
@@ -39,6 +45,7 @@ namespace ErenshorPvP
         {
             internal bool ContextSet;
             internal bool PreviousPetContext;
+            internal int PreviousDamageSourceProxyId;
         }
 
         internal struct HpTelemetryState
@@ -47,6 +54,9 @@ namespace ErenshorPvP
             internal bool TargetIsEnemy;
             internal int StartingHp;
             internal bool OwnsHealScope;
+            // Instance id of the temporary attacker that cast this heal, 0 = unattributed (e.g. the
+            // flat HealMe(int) overload, which carries no source Character at all).
+            internal int SourceProxyId;
         }
 
         internal static bool TargetTestActive { get { return _cloneNpc != null && Time.unscaledTime < _targetTestEnds; } }
@@ -180,7 +190,7 @@ namespace ErenshorPvP
             foreach (Character pet in DefenderPets) { try { if (pet != null && pet.MyNPC != null) pet.MyNPC.ForceAggroOn(null); } catch { } }
             EnemyNpcs.Clear(); EnemyActors.Clear(); Defenders.Clear(); DefenderPets.Clear();
             _fightStartedAt = 0f; _combatStartupDeadline = 0f; _damageToAttackers = 0; _petDamageToAttackers = 0; _damageToDefenders = 0;
-            _healingToAttackers = 0; _healingToDefenders = 0; _damageContextPet = false; _healTelemetryDepth = 0;
+            _healingToAttackers = 0; _healingToDefenders = 0; _damageContextPet = false; _damageSourceProxyId = 0; _healTelemetryDepth = 0;
             _loggedDamageToDefender = false; _loggedHealToAttacker = false;
             try { if (npc != null) npc.ForceAggroOn(null); } catch { }
             try { if (nav != null) { nav.ResetPath(); nav.enabled = false; } } catch { }
@@ -280,7 +290,10 @@ namespace ErenshorPvP
                     {
                         state.ContextSet = true;
                         state.PreviousPetContext = _damageContextPet;
+                        state.PreviousDamageSourceProxyId = _damageSourceProxyId;
                         _damageContextPet = targetAttacker && DefenderPets.Contains(attacker);
+                        _damageSourceProxyId = (sourceAttacker && PvpTemporaryCloneFactory.IsTemporaryActor(attacker)) ?
+                            attacker.gameObject.GetInstanceID() : 0;
                     }
                     return true;
                 }
@@ -297,7 +310,7 @@ namespace ErenshorPvP
 
         internal static void FinishDamage(DamageTelemetryState state)
         {
-            if (state.ContextSet) _damageContextPet = state.PreviousPetContext;
+            if (state.ContextSet) { _damageContextPet = state.PreviousPetContext; _damageSourceProxyId = state.PreviousDamageSourceProxyId; }
         }
 
         internal static void BeginHpTelemetry(Stats stats, ref HpTelemetryState state)
@@ -308,9 +321,21 @@ namespace ErenshorPvP
 
         internal static void BeginHealTelemetry(Stats stats, ref HpTelemetryState state)
         {
+            BeginHealTelemetry(stats, null, ref state);
+        }
+
+        // Overload used where the caster is known (Stats.HealMe(Spell, int, bool, bool, Character)).
+        // The flat HealMe(int) overload has no source Character and keeps using the overload above,
+        // so its healing still counts toward the team aggregate but stays unattributed per proxy.
+        internal static void BeginHealTelemetry(Stats stats, Character healer, ref HpTelemetryState state)
+        {
             state = new HpTelemetryState { OwnsHealScope = true };
             _healTelemetryDepth++;
-            if (_healTelemetryDepth == 1) CaptureHpTelemetry(stats, ref state);
+            if (_healTelemetryDepth == 1)
+            {
+                CaptureHpTelemetry(stats, ref state);
+                if (healer != null && EnemyActors.Contains(healer)) state.SourceProxyId = healer.gameObject.GetInstanceID();
+            }
         }
 
         private static void CaptureHpTelemetry(Stats stats, ref HpTelemetryState state)
@@ -337,6 +362,7 @@ namespace ErenshorPvP
             else
             {
                 _damageToDefenders += applied;
+                if (_damageSourceProxyId != 0) PvpTemporaryCloneFactory.RecordDamageDealt(_damageSourceProxyId, applied);
                 if (!_loggedDamageToDefender)
                 {
                     _loggedDamageToDefender = true;
@@ -355,6 +381,7 @@ namespace ErenshorPvP
                 if (state.TargetIsEnemy)
                 {
                     _healingToAttackers += applied;
+                    if (state.SourceProxyId != 0) PvpTemporaryCloneFactory.RecordHealingDone(state.SourceProxyId, applied);
                     if (!_loggedHealToAttacker)
                     {
                         _loggedHealToAttacker = true;
@@ -505,7 +532,7 @@ namespace ErenshorPvP
             Defenders.Add(player); AddPartyDefenders(); SnapshotDefenderPets();
             _fightStartedAt = Time.unscaledTime; _combatStartupDeadline = _fightStartedAt + PvpCombatStartupPolicy.DefaultStartupWindowSeconds;
             _damageToAttackers = 0; _petDamageToAttackers = 0; _damageToDefenders = 0;
-            _healingToAttackers = 0; _healingToDefenders = 0; _damageContextPet = false; _healTelemetryDepth = 0;
+            _healingToAttackers = 0; _healingToDefenders = 0; _damageContextPet = false; _damageSourceProxyId = 0; _healTelemetryDepth = 0;
             _loggedDamageToDefender = false; _loggedHealToAttacker = false;
             _lethalFight = true; _retreatRolled = false;
             try
@@ -669,6 +696,9 @@ namespace ErenshorPvP
                     "; damage_to_defenders=" + _damageToDefenders + "; healing_to_defenders=" + _healingToDefenders +
                     "; " + PvpTemporaryCloneFactory.BalanceRuntimeSummary() +
                     "; healing_assessment=" + PvpTemporaryCloneFactory.BalanceHealingAssessment(_healingToAttackers));
+                // One bounded per-proxy line per fight, logged here only - never per frame. See
+                // PvpTemporaryCloneFactory.LogPerProxyAbilitySummary.
+                PvpTemporaryCloneFactory.LogPerProxyAbilitySummary();
             }
             catch { }
         }
@@ -761,7 +791,7 @@ namespace ErenshorPvP
         {
             __state = new PvpCombatContainment.HpTelemetryState();
             if (!PvpCombatContainment.AllowHeal(__instance, __4)) return false;
-            PvpCombatContainment.BeginHealTelemetry(__instance, ref __state);
+            PvpCombatContainment.BeginHealTelemetry(__instance, __4, ref __state);
             return true;
         }
         [HarmonyPostfix]

@@ -222,3 +222,39 @@ Assert-Recovery ($controllerSource -match 'EncounterCleaned' -and $factorySource
 if ($finalRecoveryCases -ne 26) { throw "PvP final recovery matrix count mismatch: $finalRecoveryCases / 26" }
 Write-Host ("PvP final forensic recovery source matrix: PASS (" + $finalRecoveryCases + "/26)") -ForegroundColor Green
 
+# 0.5.11 timer-inventory guard. Investigation found no timer that terminates an ACTIVE fight at 30
+# seconds: _pendingExpires is the arranged-challenge OFFER expiration (before the fight starts),
+# and _despawnAt is a pre-GO setup safety despawn that BeginLethalFight neutralizes to
+# float.PositiveInfinity the moment the fight actually goes live. Both must stay exactly as found;
+# no active-combat timeout was invented, and none of the explicitly-unrelated timers moved.
+$controllerSource = Get-Content (Join-Path $Root "src\PvpController.cs") -Raw
+$settingsSource = Get-Content (Join-Path $Root "src\PvpSettings.cs") -Raw
+if ($controllerSource -notmatch '_pendingExpires = now \+ 30f;') { throw "PvP timer guard failed: challenge offer expiration (_pendingExpires) changed unexpectedly." }
+if ($factorySource -notmatch '_despawnAt = Time\.unscaledTime \+ 30f;' -or $factorySource -notmatch '_despawnAt = Time\.unscaledTime \+ 20f;') { throw "PvP timer guard failed: pre-GO setup despawn timers changed unexpectedly." }
+if ($factorySource -notmatch 'if \(PvpCombatContainment\.LethalFightActive\) _despawnAt = float\.PositiveInfinity;') { throw "PvP timer guard failed: active-fight despawn neutralization was removed - this would reintroduce a timer that ends an active fight." }
+if ($settingsSource -notmatch 'VictoryCooldownMinutes = 30;') { throw "PvP timer guard failed: reward cooldown (VictoryCooldownMinutes) changed unexpectedly." }
+if ($controllerSource -notmatch '_nextScan = Time\.unscaledTime \+ 300f;' -or $controllerSource -notmatch '_nextOffer < Time\.unscaledTime \+ 300f') { throw "PvP timer guard failed: scan/offer/ambush cooldown changed unexpectedly." }
+Write-Host "PvP timer-inventory guard: PASS (no active-fight-terminating timer exists; offer/despawn/reward/scan timers unchanged)" -ForegroundColor Green
+
+# 0.5.11 per-proxy ability-use observability guards. The terminal summary must stay bounded (one
+# line per proxy, logged exactly once per fight end) and must never be reachable from a per-frame
+# path such as Tick()/Update().
+if ($factorySource -notmatch 'internal static void LogPerProxyAbilitySummary\(\)') { throw "PvP diagnostics guard failed: per-proxy terminal summary is missing." }
+$perProxyCallSites = [regex]::Matches($containmentSource + $factorySource, 'LogPerProxyAbilitySummary\(\)').Count
+if ($perProxyCallSites -ne 2) { throw "PvP diagnostics guard failed: per-proxy terminal summary must be defined once and called exactly once (found $perProxyCallSites references, expected 2: the definition and the single call site)." }
+$balanceSummaryBody = [regex]::Match($containmentSource, 'private\s+static\s+void\s+LogBalanceSummary\(string reason\)[\s\S]*?\n        \}')
+if (-not $balanceSummaryBody.Success -or $balanceSummaryBody.Value -notmatch 'LogPerProxyAbilitySummary\(\)') { throw "PvP diagnostics guard failed: per-proxy summary is not called from the terminal balance summary." }
+$tickBody = [regex]::Match($containmentSource, 'internal\s+static\s+void\s+Tick\(\)[\s\S]*?\n        \}')
+if ($tickBody.Success -and $tickBody.Value -match 'LogPerProxyAbilitySummary') { throw "PvP diagnostics guard failed: per-proxy summary must never be reachable from the per-frame Tick() path." }
+if ($factorySource -notmatch 'AttackSkillDecisionCounts' -or $factorySource -notmatch 'AttackSpellDecisionCounts' -or
+    $factorySource -notmatch 'DamageDealtCounts' -or $factorySource -notmatch 'HealingDoneCounts') {
+    throw "PvP diagnostics guard failed: split decision / per-proxy outcome counters are missing."
+}
+if ($startupSource -notmatch 'internal static string ProxyAbilityUseAssessment') { throw "PvP diagnostics guard failed: ProxyAbilityUseAssessment classification is missing." }
+Write-Host "PvP per-proxy ability-use observability guard: PASS (bounded, not per-frame)" -ForegroundColor Green
+
+# Version guard.
+$pluginSource = Get-Content (Join-Path $Root "src\ErenshorPvPPlugin.cs") -Raw
+if ($pluginSource -notmatch 'LunarisPlugin\("forgetwhtuno\.erenshor\.pvp", "0\.5\.11", "forgetwhtuno"') { throw "PvP version guard failed: plugin version is not 0.5.11." }
+Write-Host "PvP version guard: PASS (0.5.11)" -ForegroundColor Green
+
